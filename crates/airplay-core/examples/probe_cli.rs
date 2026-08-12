@@ -1,4 +1,4 @@
-//! Probe rápido por línea de comandos:  cargo run -p airplay-core --example probe_cli -- 192.168.1.50
+//! Probe rápido por línea de comandos:  cargo run -p cap-core --example probe_cli -- 192.168.1.50
 
 use std::net::IpAddr;
 
