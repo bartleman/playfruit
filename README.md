@@ -103,9 +103,8 @@ Binaries land in `target/release/` (`playfruit`, `playfruit-tray`).
 Licensed **GPL-2.0-or-later**. The upstream projects below declare GPL-2.0
 without specifying "only" or "or later" in their grant; per GPLv2 §9 this
 project distributes under "any version" terms and declares or-later (which
-also resolves Apache-2.0 dependency compatibility via GPLv3). Upstream
-clarification has been requested; if an upstream states GPL-2.0-only, this
-declaration will be revisited.
+also resolves Apache-2.0 dependency compatibility via GPLv3). If an upstream
+states GPL-2.0-only, this declaration will be revisited.
 
 The AirPlay 2 protocol stack is vendored from
 [Pabldi08/airplay2-rs](https://github.com/Pabldi08/airplay2-rs) @ `1baeaae`
