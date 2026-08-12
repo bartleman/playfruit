@@ -1,0 +1,20 @@
+[package]
+name = "playfruit-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "playfruit-tray"
+path = "src/main.rs"
+
+[dependencies]
+tao = "0.30"
+tray-icon = "0.19"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+playfruit-cli = { path = "../playfruit-cli" }
+cap-core = { path = "../airplay-core" }

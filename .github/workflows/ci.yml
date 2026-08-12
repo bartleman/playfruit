@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p playfruit-cli -p playfruit-tray
+      - name: Build protocol test
+        run: cargo build --release --locked -p cap-core --example click_cli
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir stage
+          cp target/release/playfruit.exe target/release/playfruit-tray.exe stage/
+          cp target/release/examples/click_cli.exe stage/
+          cp LICENSE README.md stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playfruit-windows
+          path: stage/
+          if-no-files-found: error
+
+  macos-check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: playfruit-windows
+          path: dist
+      - name: Add release notes file and zip
+        run: |
+          cat > dist/README.txt <<'EOF'
+          Playfruit — stream Windows system audio to HomePods over AirPlay 2.
+          Source: https://github.com/bartleman/playfruit (GPL-2.0-or-later; see LICENSE)
+
+          playfruit-tray.exe — the app. Run it, right-click the tray circle,
+                               pick your HomePod under "Stream to".
+          playfruit.exe      — command-line version: playfruit <homepod-ip>
+          click_cli.exe      — latency test: click_cli <homepod-ip> 12 0.35
+
+          First run: SmartScreen warns (unsigned build): More info -> Run anyway.
+          Windows Firewall will ask for network access: allow on private
+          networks — the HomePod sends timing packets back to the app.
+          EOF
+          cd dist && zip -r "../playfruit-windows-${GITHUB_REF_NAME}.zip" .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: playfruit-windows-*.zip
+          prerelease: true

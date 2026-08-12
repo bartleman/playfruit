@@ -1,0 +1,135 @@
+# Playfruit 🍐
+
+Stream your PC's system audio to a HomePod over AirPlay 2 with ~half-second
+latency — low enough to watch live sports with the video on screen.
+
+Born from a specific itch: watching football on a Windows machine with the
+sound on a HomePod, without the ~2 s delay that standard AirPlay senders
+impose.
+
+> **Expectations**: this is a personal project, maintained best-effort.
+> AirPlay 2 is reverse-engineered; Apple firmware updates can (and
+> occasionally do) break senders like this one until the community catches
+> up. Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Status / maturity
+
+- ✅ AirPlay 2 transient pairing + encrypted realtime streaming, validated
+  against a HomePod mini and a HomePod gen 2 (firmware 26.6)
+- ✅ ~450–500 ms end-to-end latency (informal ear-measurement with the
+  bundled `click_cli` test tool)
+- ✅ Clock-drift regulation for multi-hour streams, silence keepalive
+  (quiet periods don't kill the session), auto-reconnect with backoff
+- ⚠️ **The Windows system-audio capture path (WASAPI) compiles and is CI-built,
+  but has not yet been field-tested on real Windows hardware.** Treat releases
+  as pre-release quality until this note disappears.
+
+## Install
+
+**Windows (recommended):** download `playfruit-windows-*.zip` from
+[Releases](https://github.com/bartleman/playfruit/releases), unzip, and run
+`playfruit-tray.exe`. No installer, no dependencies.
+
+Two first-run prompts are expected:
+
+- **SmartScreen** warns because the binaries are unsigned: *More info →
+  Run anyway*.
+- **Windows Firewall** asks for network access: allow on **private
+  networks**. This is required — AirPlay receivers send timing/sync packets
+  *back* to the app over UDP; without the rule you get silence.
+
+## Using the tray app
+
+Run `playfruit-tray.exe`. A gray circle appears in the system tray (check
+the `^` overflow area near the clock). Right-click it:
+
+- **Stream to** — HomePods and Apple TVs discovered on your network;
+  click one to connect. The icon turns green while streaming.
+- **Latency** — `Gaming` (~0.5 s, default, best for live sports),
+  `Video` (~0.6 s, steadier), `Music` (~0.7 s, most robust). If audio
+  stutters or "robotizes" on busy Wi-Fi, step down toward `Music`.
+- **Volume** presets, **Disconnect**, **Quit**.
+
+Settings persist in `%APPDATA%\playfruit\config.json`; logs are at
+`%APPDATA%\playfruit\playfruit-tray.log`.
+
+## Using the CLI
+
+```
+playfruit <homepod-ip> [--volume 0.5] [--latency gaming|video|music] [--name NAME]
+```
+
+To find your HomePod's IP: the tray app's device list is the easy way;
+otherwise check your router's client list, or on macOS run
+`dns-sd -B _airplay._tcp local.` and `ping <name>.local`.
+
+Test tools (in `crates/airplay-core/examples/`):
+
+- `click_cli <ip> [clicks] [vol]` — 1/s click track for ear-measuring
+  end-to-end latency (on macOS it also plays a local reference click)
+- `tone_cli <ip> [secs] [hz] [amp]` — stream a sine tone
+- `probe_cli <ip>` / `pair_cli <ip>` — silent protocol/pairing checks
+
+## Troubleshooting
+
+- **Silence but the app says streaming** — almost always the firewall rule;
+  re-check that inbound UDP is allowed for the app on private networks.
+- **Stutter / robotized audio** — Wi-Fi congestion; switch the latency
+  profile to `Video` or `Music`, prefer Ethernet on the PC, or move the
+  HomePod closer to the access point.
+- **Wi-Fi blip mid-match** — the engine detects the dead session within ~6 s
+  and reconnects automatically with backoff; the tray tooltip shows progress.
+- **Linux** — capture uses the PulseAudio/PipeWire monitor via `parec`
+  (install `pulseaudio-utils` or `pipewire-pulse`); falls back to the `cpal`
+  input device. Linux is a development platform, not a supported target yet.
+
+## Building from source
+
+Prerequisites: [Rust](https://rustup.rs) stable.
+
+```sh
+# Native build (Windows, macOS, Linux)
+cargo build --release -p playfruit-cli -p playfruit-tray
+
+# Cross-compile Windows binaries from macOS/Linux (needs mingw-w64)
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu -p playfruit-cli -p playfruit-tray
+```
+
+Binaries land in `target/release/` (`playfruit`, `playfruit-tray`).
+
+## Provenance & license
+
+Licensed **GPL-2.0-or-later**. The upstream projects below declare GPL-2.0
+without specifying "only" or "or later" in their grant; per GPLv2 §9 this
+project distributes under "any version" terms and declares or-later (which
+also resolves Apache-2.0 dependency compatibility via GPLv3). Upstream
+clarification has been requested; if an upstream states GPL-2.0-only, this
+declaration will be revisited.
+
+The AirPlay 2 protocol stack is vendored from
+[Pabldi08/airplay2-rs](https://github.com/Pabldi08/airplay2-rs) @ `1baeaae`
+(a fork of [lmcgartland/airplay2-rs](https://github.com/lmcgartland/airplay2-rs)).
+The capture and connection-glue crates originate from
+[Pabldi08/AirSend](https://github.com/Pabldi08/AirSend) (GPL-2.0 per its
+`Cargo.toml` at the time of import, 2026-08). Thanks to both authors — the
+hard protocol work is theirs.
+
+**Local modifications to the vendored tree** (each patched file carries a
+`MODIFIED` notice):
+
+- `airplay-audio/src/streamer.rs` — live-mode prefill reduced from ~1 s to
+  ~200 ms standing fill, initial wait capped at 250 ms, and the live channel
+  drained eagerly (the old 40% threshold silently added ~½ s of latency).
+- `airplay-client/src/connection.rs` — `send_feedback()` propagates timeouts
+  as errors instead of masking them, enabling dead-session detection.
+- `airplay-audio/Cargo.toml`, `src/encoder.rs`, `src/lib.rs` — the AAC
+  encoder is feature-gated off by default (`fdk-aac` is GPL-incompatible and
+  unnecessary: streaming uses ALAC).
+
+Comments in inherited code are partly in Spanish (upstream's language);
+they're welcome to stay, and translation PRs are equally welcome.
+
+*Playfruit is an independent project, not affiliated with or endorsed by
+Apple Inc. AirPlay, HomePod, and Apple TV are trademarks of Apple Inc.,
+used here only to describe compatibility.*

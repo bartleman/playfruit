@@ -1,0 +1,24 @@
+[package]
+name = "audio-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+thiserror = { workspace = true }
+ringbuf = { workspace = true }
+crossbeam-channel = "0.5"
+
+[target.'cfg(unix)'.dependencies]
+cpal = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.15"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "dump_wav"
+path = "examples/dump_wav.rs"
