@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "audio-capture"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -303,6 +303,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasapi",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -452,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "cap-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "airplay-audio",
  "airplay-client",
@@ -2393,7 +2394,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "playfruit-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "audio-capture",
  "cap-core",
@@ -2405,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "playfruit-tray"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "cap-core",
  "playfruit-cli",

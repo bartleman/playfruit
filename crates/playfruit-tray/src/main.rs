@@ -131,10 +131,16 @@ mod firewall {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Config {
     volume: f32,
     latency: LatencyProfile,
+    #[serde(default = "default_true")]
+    mute_local: bool,
     last_ip: Option<String>,
     last_name: Option<String>,
 }
@@ -144,6 +150,7 @@ impl Default for Config {
         Self {
             volume: 0.5,
             latency: LatencyProfile::Video,
+            mute_local: true,
             last_ip: None,
             last_name: None,
         }
@@ -300,6 +307,7 @@ struct App {
     device_items: Vec<(CheckMenuItem, Speaker)>,
     latency_items: Vec<(CheckMenuItem, LatencyProfile)>,
     volume_items: Vec<(CheckMenuItem, f32)>,
+    homepod_only_item: CheckMenuItem,
     disconnect_item: MenuItem,
 }
 
@@ -322,6 +330,7 @@ impl App {
         for (item, v) in &self.volume_items {
             item.set_checked((v - self.config.volume).abs() < 0.01);
         }
+        self.homepod_only_item.set_checked(self.config.mute_local);
         self.disconnect_item.set_enabled(self.engine.is_some());
     }
 
@@ -335,6 +344,7 @@ impl App {
             name: sp.name.clone(),
             volume: self.config.volume,
             latency: self.config.latency,
+            mute_local: self.config.mute_local,
         });
         self.engine = Some(engine);
         self.status_rx = Some(rx);
@@ -514,6 +524,13 @@ fn main() {
     })
     .collect();
 
+    let homepod_only_item = CheckMenuItem::with_id(
+        "homepod_only",
+        "HomePod only (mute PC speakers)",
+        true,
+        config.mute_local,
+        None,
+    );
     let disconnect_item = MenuItem::with_id("disconnect", "Disconnect", false, None);
     let quit_item = MenuItem::with_id("quit", "Quit Playfruit", true, None);
 
@@ -527,6 +544,7 @@ fn main() {
         &PredefinedMenuItem::separator(),
         &latency_menu,
         &volume_menu,
+        &homepod_only_item,
         &PredefinedMenuItem::separator(),
         &disconnect_item,
         &quit_item,
@@ -553,6 +571,7 @@ fn main() {
         device_items: Vec::new(),
         latency_items,
         volume_items,
+        homepod_only_item,
         disconnect_item,
     };
 
@@ -610,6 +629,12 @@ fn main() {
                         std::thread::sleep(Duration::from_millis(400));
                     }
                     std::process::exit(0);
+                }
+                "homepod_only" => {
+                    app.config.mute_local = !app.config.mute_local;
+                    save_config(&app.config);
+                    app.refresh_checks();
+                    app.restart_if_active();
                 }
                 "disconnect" => app.disconnect(),
                 "firewall" => {

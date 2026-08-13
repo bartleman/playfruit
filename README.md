@@ -56,6 +56,12 @@ the `^` overflow area near the clock). Right-click it:
 - **Latency** — `Video` (~0.6 s, default), `Gaming` (~0.5 s, for strong
   Wi-Fi), `Music` (~0.7 s, most robust). If audio stutters or "robotizes",
   step toward `Music`.
+- **HomePod only (mute PC speakers)** — on by default: once audio is
+  flowing, the PC's speakers mute so you hear only the HomePod (no ~0.6s
+  echo). Speakers restore automatically on disconnect/quit. On the minority
+  of audio drivers where muting the output also silences the capture,
+  Playfruit detects it within seconds, restores your speakers, and tells
+  you — route audio to an unused output device in that case.
 - **Volume** presets, **Disconnect**, **Quit**.
 
 Settings persist in `%APPDATA%\playfruit\config.json`; logs are at
@@ -64,8 +70,10 @@ Settings persist in `%APPDATA%\playfruit\config.json`; logs are at
 ## Using the CLI
 
 ```
-playfruit <name-or-ip> [--volume 0.5] [--latency gaming|video|music]
+playfruit <name-or-ip> [--volume 0.5] [--latency gaming|video|music] [--keep-pc-audio]
 ```
+
+The PC's speakers mute while streaming (no echo); `--keep-pc-audio` opts out.
 
 Device names work directly — `playfruit kitchen` finds the speaker via
 mDNS (case-insensitive fragment match). `playfruit doctor` lists everything

@@ -65,6 +65,16 @@ pub mod linux;
 pub mod linux_parec;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+mod endpoint;
+#[cfg(windows)]
+pub use endpoint::set_output_mute;
+
+/// Non-Windows stub: local-mute ("HomePod only") is a Windows feature.
+#[cfg(not(windows))]
+pub fn set_output_mute(_mute: bool) -> Result<bool, String> {
+    Err("endpoint mute is Windows-only".into())
+}
 
 /// Arranca la captura del audio del sistema y manda frames por el canal devuelto.
 ///

@@ -36,6 +36,10 @@ pub struct EngineConfig {
     pub name: String,
     pub volume: f32,
     pub latency: LatencyProfile,
+    /// "HomePod only": mute the PC's speakers while streaming. Engaged only
+    /// after real audio is confirmed flowing; auto-rolled-back with a Warning
+    /// if the audio driver's loopback tap sits post-mute (capture dies).
+    pub mute_local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +240,10 @@ async fn supervise(
         // Standing fill (~300ms) is pre-charged inside open_live_stream now,
         // before the streamer starts — no engine-side precharge needed.
         let dead = Arc::new(AtomicBool::new(false));
+        // "HomePod only" mute state: engaged by the health task, restored at
+        // the single session-end restore point below.
+        let mute_engaged = Arc::new(AtomicBool::new(false));
+        let mute_prev = Arc::new(AtomicBool::new(false));
         // Milliseconds since session epoch of the last NON-ZERO capture frame;
         // u64::MAX = none yet. Written by the pump, read by the health task.
         let last_audio_ms = Arc::new(AtomicU64::new(u64::MAX));
@@ -245,10 +253,15 @@ async fn supervise(
         let hb_status = status.clone();
         let hb_name = config.name.clone();
         let hb_last_audio = last_audio_ms.clone();
+        let hb_mute_engaged = mute_engaged.clone();
+        let hb_mute_prev = mute_prev.clone();
+        let mute_local = config.mute_local;
         let heartbeat_task = tokio::spawn(async move {
             let mut strikes: u32 = 0;
             let mut timing_at_first_strike: Option<u64> = None;
             let mut silent_reported = false;
+            let mut muted_at_ms: Option<u64> = None;
+            let mut mute_given_up = false;
             let mut timing_warned = false;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -310,6 +323,50 @@ async fn supervise(
                     });
                 }
 
+                // "HomePod only": mute local speakers once real audio is
+                // confirmed flowing (so a quiet PC is never misread), then
+                // verify the capture SURVIVES the mute — on drivers whose
+                // loopback tap sits post-mute it dies, and we roll back.
+                if mute_local && !mute_given_up {
+                    let last = hb_last_audio.load(Ordering::Relaxed);
+                    let now_ms = age.as_millis() as u64;
+                    if !hb_mute_engaged.load(Ordering::SeqCst) {
+                        if last != u64::MAX && now_ms.saturating_sub(last) < 3_000 {
+                            match audio_capture::set_output_mute(true) {
+                                Ok(prev) => {
+                                    hb_mute_prev.store(prev, Ordering::SeqCst);
+                                    hb_mute_engaged.store(true, Ordering::SeqCst);
+                                    muted_at_ms = Some(now_ms);
+                                    tracing::info!("HomePod only: PC speakers muted");
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "local mute unavailable");
+                                    mute_given_up = true;
+                                }
+                            }
+                        }
+                    } else if let Some(muted_at) = muted_at_ms {
+                        if last < muted_at && now_ms.saturating_sub(muted_at) > 3_000 {
+                            // Capture stopped the moment we muted: this
+                            // driver taps loopback after the mute stage.
+                            let _ = audio_capture::set_output_mute(
+                                hb_mute_prev.load(Ordering::SeqCst),
+                            );
+                            hb_mute_engaged.store(false, Ordering::SeqCst);
+                            muted_at_ms = None;
+                            mute_given_up = true;
+                            tracing::warn!(
+                                "audio driver mutes the capture too — 'HomePod only' rolled back"
+                            );
+                            let _ = hb_status.send(EngineStatus::Warning {
+                                name: hb_name.clone(),
+                                message: "This audio driver can't mute speakers without                                           muting the stream — 'HomePod only' disabled.                                           Route audio to an unused output device instead."
+                                    .into(),
+                            });
+                        }
+                    }
+                }
+
                 // Silence tell: connected but the PC isn't producing audio —
                 // normal (nothing playing), so it's a state, not an error.
                 if age > Duration::from_secs(5) && !timing_warned {
@@ -352,6 +409,13 @@ async fn supervise(
         .unwrap_or(PumpExit::SessionDead);
 
         heartbeat_task.abort();
+
+        // Restore local speakers if "HomePod only" muted them (single restore
+        // point — every session exit path passes through here).
+        if mute_engaged.swap(false, Ordering::SeqCst) {
+            let _ = audio_capture::set_output_mute(mute_prev.load(Ordering::SeqCst));
+            tracing::info!("PC speaker mute restored");
+        }
 
         // Best-effort teardown, bounded so a dead socket can't hang shutdown.
         {
@@ -652,6 +716,7 @@ mod tests {
             name: "blackhole".into(),
             volume: 0.1,
             latency: LatencyProfile::Gaming,
+            mute_local: false,
         });
         std::thread::sleep(Duration::from_millis(300));
         let started = Instant::now();

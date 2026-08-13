@@ -23,6 +23,7 @@ fn log_dir_hint() -> String {
 
 struct Args {
     target: String,
+    mute_local: bool,
     volume: f32,
     latency: LatencyProfile,
     name: String,
@@ -32,6 +33,7 @@ fn parse_args() -> Result<Args, String> {
     let mut ip = None;
     let mut volume = 0.5f32;
     let mut latency = LatencyProfile::Video;
+    let mut mute_local = true;
     let mut name = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -52,6 +54,7 @@ fn parse_args() -> Result<Args, String> {
                     }
                 };
             }
+            "--keep-pc-audio" => mute_local = false,
             "--name" | "-n" => name = it.next(),
             "--help" | "-h" => {
                 println!("usage: playfruit <ip> [--volume 0.5] [--latency gaming|video|music] [--name NAME]");
@@ -74,6 +77,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         name: name.unwrap_or_else(|| format!("HomePod {target}")),
         target,
+        mute_local,
         volume: volume.clamp(0.0, 1.0),
         latency,
     })
@@ -155,6 +159,7 @@ fn main() {
         name: resolved_name.unwrap_or(args.name),
         volume: args.volume,
         latency: args.latency,
+        mute_local: args.mute_local,
     });
 
     // Print status transitions until Ctrl-C or a terminal state.
