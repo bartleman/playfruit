@@ -1,3 +1,8 @@
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
+
+# Static CRT for MSVC builds (what CI ships): without this the exes depend on
+# VCRUNTIME140.dll, which clean Windows installs don't have.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
