@@ -31,7 +31,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut ip = None;
     let mut volume = 0.5f32;
-    let mut latency = LatencyProfile::Gaming;
+    let mut latency = LatencyProfile::Video;
     let mut name = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {

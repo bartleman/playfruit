@@ -143,7 +143,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             volume: 0.5,
-            latency: LatencyProfile::Gaming,
+            latency: LatencyProfile::Video,
             last_ip: None,
             last_name: None,
         }
@@ -486,8 +486,8 @@ fn main() {
 
     let latency_menu = Submenu::new("Latency", true);
     let latency_items: Vec<(CheckMenuItem, LatencyProfile)> = [
-        ("lat:gaming", "Gaming (~0.5 s, best for sports)", LatencyProfile::Gaming),
-        ("lat:video", "Video (~0.6 s, steadier)", LatencyProfile::Video),
+        ("lat:gaming", "Gaming (~0.5 s, needs strong Wi-Fi)", LatencyProfile::Gaming),
+        ("lat:video", "Video (~0.6 s, default)", LatencyProfile::Video),
         ("lat:music", "Music (~0.7 s, most robust)", LatencyProfile::Music),
     ]
     .into_iter()

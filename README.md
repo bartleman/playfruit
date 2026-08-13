@@ -53,9 +53,9 @@ the `^` overflow area near the clock). Right-click it:
 - **Mirror PC audio to** — HomePods and Apple TVs discovered on your
   network; click one to connect. Playfruit mirrors whatever your PC's
   default output plays (it does not appear as a separate playback device).
-- **Latency** — `Gaming` (~0.5 s, default, best for live sports),
-  `Video` (~0.6 s, steadier), `Music` (~0.7 s, most robust). If audio
-  stutters or "robotizes" on busy Wi-Fi, step down toward `Music`.
+- **Latency** — `Video` (~0.6 s, default), `Gaming` (~0.5 s, for strong
+  Wi-Fi), `Music` (~0.7 s, most robust). If audio stutters or "robotizes",
+  step toward `Music`.
 - **Volume** presets, **Disconnect**, **Quit**.
 
 Settings persist in `%APPDATA%\playfruit\config.json`; logs are at

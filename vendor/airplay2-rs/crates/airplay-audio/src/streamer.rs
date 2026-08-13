@@ -348,7 +348,7 @@ fn sender_thread_main(
 
                     // Log burst with significant jitter
                     if abs_jitter > 2.0 * burst_size as f64 {
-                        tracing::warn!(
+                        tracing::debug!(
                             "JITTER burst#{}: interval={:.3}ms target={:.3}ms jitter={:+.3}ms",
                             packet_count / burst_size as u64, interval_ms, target_ms, jitter_ms
                         );
@@ -399,7 +399,7 @@ fn sender_thread_main(
                     // Catch up if we've fallen behind by more than one burst
                     let now_ns = monotonic_now_ns();
                     if now_ns > next_deadline_ns + burst_duration_ns {
-                        tracing::warn!(
+                        tracing::debug!(
                             "Sender thread fell behind by {:.2}ms, resetting deadline",
                             (now_ns - next_deadline_ns) as f64 / 1_000_000.0
                         );
@@ -411,7 +411,7 @@ fn sender_thread_main(
                     next_deadline += frame_duration * burst_size as u32;
                     let now = std::time::Instant::now();
                     if now > next_deadline + frame_duration * burst_size as u32 {
-                        tracing::warn!(
+                        tracing::debug!(
                             "Sender thread fell behind by {:.2}ms, resetting deadline",
                             (now - next_deadline).as_secs_f64() * 1000.0
                         );
@@ -1057,24 +1057,29 @@ async fn run_streamer(
                     guard.clock_offset = Some(latest);
                 }
             }
-            // Always drain the live channel promptly: if we only decode below a
-            // fill threshold, PCM backs up in the channel (~511ms capacity) and
-            // silently adds latency. Decode cost is ~1ms in release builds.
-            if guard.buffer.fill_percentage() < 100.0 {
+            // Drain the live channel promptly (a low gate hides ~511ms of
+            // channel backlog as silent latency) but NEVER enter decode without
+            // headroom: push into a full buffer is a fatal BufferOverflow, and
+            // the 3-frame decode batch needs slack. 95% of the 2000ms buffer
+            // leaves >3 free slots — overflow is structurally impossible again.
+            if guard.buffer.fill_percentage() < 95.0 {
                 let decode_start = Instant::now();
                 decode_some_inner(&mut guard)?;
                 let decode_elapsed = decode_start.elapsed();
                 if decode_elapsed.as_millis() > 10 {
-                    tracing::warn!(
+                    tracing::debug!(
                         "Decode took {:.2}ms (blocking send loop!)",
                         decode_elapsed.as_secs_f64() * 1000.0
                     );
                 }
             }
 
-            // Check for recovery from Buffering state
+            // Check for recovery from Buffering state.
+            // MODIFIED (Playfruit): 10% (=200ms) was tuned against a ~1s
+            // standing fill; ours is ~300ms, so a 200ms rebuffer extended
+            // every underrun gap by 200ms. ~50ms is enough to restart cleanly.
             if guard.state == StreamerState::Buffering {
-                if guard.buffer.fill_percentage() > 10.0 {
+                if guard.buffer.fill_percentage() > 2.5 {
                     guard.state = StreamerState::Streaming;
                     state_cache.store(StreamerState::Streaming as u8, Ordering::Relaxed);
                 } else {

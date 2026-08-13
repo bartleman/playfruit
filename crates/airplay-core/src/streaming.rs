@@ -238,6 +238,18 @@ pub async fn open_live_stream(
     let (sender, decoder) =
         LiveAudioDecoder::create_pair(sample_rate, channels, QUEUE_CAPACITY);
 
+    // Pre-charge ~300ms of silence BEFORE the streamer starts: the prefill
+    // wait inside start_streaming_live can then actually see data, so
+    // playback starts immediately with a real standing fill instead of
+    // burning the wait at 0% and opening with a guaranteed underrun.
+    for _ in 0..15 {
+        let _ = sender.try_send(LivePcmFrame {
+            samples: vec![0i16; 882 * channels as usize],
+            channels,
+            sample_rate,
+        });
+    }
+
     tracing::info!("setup OK — start_streaming_live()");
     connection
         .start_streaming_live(decoder)

@@ -15,9 +15,17 @@ use cap_core::streaming::{open_live_stream, LatencyProfile, LivePcmFrame};
 
 /// 20 ms of silence at 44.1 kHz stereo — keepalive unit when capture is quiet.
 const SILENCE_FRAMES: usize = 882;
-/// ~300 ms pre-charged standing fill: fixed known latency, absorbs jitter.
-/// (200 ms proved too tight for Windows desktop scheduling.)
-const PRECHARGE_CHUNKS: usize = 15;
+/// Keepalive engages only when the stream is this far behind wall clock:
+/// half the ~300ms standing fill. Routine scheduler stalls (20-150ms) are
+/// absorbed by the fill, exactly what it exists for; only true capture
+/// silence crosses this line. Deliberately DECOUPLED from the drift deadband
+/// (30ms) — sharing them made injection hair-triggered on slow-clock
+/// machines.
+const KEEPALIVE_DEFICIT_FRAMES: i64 = 6_615; // ~150ms @ 44.1kHz
+/// A deficit beyond ~1s means the wall clock jumped (suspend/resume, hard
+/// stall) — catch-up silence past the receiver's buffer is meaningless, so
+/// re-baseline instead of stuffing.
+const REBASELINE_DEFICIT_FRAMES: i64 = 44_100;
 /// Consecutive heartbeat failures before the session is declared dead.
 const HEARTBEAT_STRIKES: u32 = 3;
 
@@ -225,14 +233,8 @@ async fn supervise(
             tracing::info!(discarded, "dropped stale capture frames from the outage");
         }
 
-        for _ in 0..PRECHARGE_CHUNKS {
-            let _ = sender.try_send(LivePcmFrame {
-                samples: vec![0i16; SILENCE_FRAMES * channels as usize],
-                channels,
-                sample_rate,
-            });
-        }
-
+        // Standing fill (~300ms) is pre-charged inside open_live_stream now,
+        // before the streamer starts — no engine-side precharge needed.
         let dead = Arc::new(AtomicBool::new(false));
         // Milliseconds since session epoch of the last NON-ZERO capture frame;
         // u64::MAX = none yet. Written by the pump, read by the health task.
@@ -245,6 +247,7 @@ async fn supervise(
         let hb_last_audio = last_audio_ms.clone();
         let heartbeat_task = tokio::spawn(async move {
             let mut strikes: u32 = 0;
+            let mut timing_at_first_strike: Option<u64> = None;
             let mut silent_reported = false;
             let mut timing_warned = false;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -262,8 +265,28 @@ async fn supervise(
                         strikes += 1;
                         tracing::warn!(error = %e, strikes, "heartbeat failure");
                         if strikes >= HEARTBEAT_STRIKES {
-                            hb_dead.store(true, Ordering::SeqCst);
-                            break;
+                            // Second liveness signal before declaring death:
+                            // the receiver queries our clock several times a
+                            // second while it can reach us. RTSP slow but
+                            // timing advancing = congested-yet-alive session —
+                            // upstream's policy was to ride those out, and it
+                            // was right. Both signals dead => reconnect.
+                            let advancing = match (timing_count, timing_at_first_strike) {
+                                (Some(now_c), Some(then_c)) => now_c > then_c,
+                                _ => false,
+                            };
+                            if advancing {
+                                tracing::info!(
+                                    "RTSP slow but clock-sync alive — riding out the stall"
+                                );
+                                strikes = 0;
+                                timing_at_first_strike = None;
+                            } else {
+                                hb_dead.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        } else if strikes == 1 {
+                            timing_at_first_strike = timing_count;
                         }
                     }
                 }
@@ -381,7 +404,7 @@ fn pump_loop(
     session_epoch: Instant,
 ) -> PumpExit {
     let ch = channels as usize;
-    let start = Instant::now();
+    let mut start = Instant::now();
     let mut pushed_frames: u64 = 0;
     // Deadband before correcting: ±30 ms of accumulated skew.
     let deadband = (sample_rate as f64 * 0.030) as i64;
@@ -413,17 +436,25 @@ fn pump_loop(
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 // Deficit-gated keepalive. A timeout alone means nothing on a
-                // desktop OS — normal threads routinely stall 20-50ms and the
-                // queued real frames arrive right after; injecting fixed
-                // silence on every timeout fragments the audio and pushes the
-                // stream ahead of real time until the send queue chokes
-                // (field symptom: plays a moment, dies, repeats). Only inject
-                // when the stream is genuinely BEHIND wall-clock real time —
-                // true capture silence — and inject the actual deficit.
+                // desktop OS — normal threads routinely stall 20-150ms and the
+                // queued real frames arrive right after; the ~300ms standing
+                // fill exists to absorb exactly that, so injection engages
+                // only at ~150ms behind wall clock (true capture silence).
                 let elapsed_frames =
                     (start.elapsed().as_secs_f64() * sample_rate as f64) as i64;
                 let deficit = elapsed_frames - pushed_frames as i64;
-                if deficit <= deadband {
+                if deficit > REBASELINE_DEFICIT_FRAMES {
+                    // Wall clock jumped (suspend/stall): stuffing seconds of
+                    // silence is useless — restart the timeline accounting.
+                    tracing::warn!(
+                        deficit_ms = deficit * 1000 / sample_rate as i64,
+                        "clock jump detected — re-baselining timeline"
+                    );
+                    start = Instant::now();
+                    pushed_frames = 0;
+                    continue;
+                }
+                if deficit <= KEEPALIVE_DEFICIT_FRAMES {
                     continue;
                 }
                 // Cap per-iteration injection at 200ms to catch up smoothly.
