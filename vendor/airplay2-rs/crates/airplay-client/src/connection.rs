@@ -207,6 +207,10 @@ pub struct Connection {
     timing_offset: Option<ClockOffset>,
     timing_tx: Option<watch::Sender<ClockOffset>>,
     control_task: Option<tokio::task::JoinHandle<()>>,
+    // MODIFIED (Playfruit): cooperative shutdown for the control-loop
+    // spawn_blocking tasks below — without it they run forever and block
+    // tokio Runtime shutdown (frozen callers).
+    control_stop: Arc<std::sync::atomic::AtomicBool>,
     timing_task: Option<JoinHandle<()>>,
     timing_server: Option<NtpTimingServer>,
     /// PTP master instance (sender IS the timing master)
@@ -341,6 +345,7 @@ impl Connection {
             ptp_master_clock_id: None,
             control_receiver: None,
             control_task: None,
+            control_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events_stream: None,
             render_delay_ms: 0,
             eq_config: None,
@@ -506,6 +511,7 @@ impl Connection {
             ptp_master_clock_id: None,
             control_receiver: None,
             control_task: None,
+            control_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events_stream: None,
             render_delay_ms: 0,
             eq_config: None,
@@ -707,6 +713,7 @@ impl Connection {
             ptp_master_clock_id: None,
             control_receiver: None,
             control_task: None,
+            control_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             events_stream: None,
             render_delay_ms: 0,
             eq_config: None,
@@ -972,6 +979,8 @@ impl Connection {
 
     /// Disconnect and clean up.
     pub async fn disconnect(&mut self) -> Result<()> {
+        // MODIFIED (Playfruit): stop the control-loop blocking task.
+        self.control_stop.store(true, std::sync::atomic::Ordering::Relaxed);
         // Stop streaming if active
         if let Some(ref mut streamer) = self.streamer {
             streamer.stop().await?;
@@ -1107,10 +1116,16 @@ impl Connection {
             let streamer_clone = streamer.clone();
             let rt_handle = tokio::runtime::Handle::current();
             let stats = Arc::clone(&self.stream_stats);
+            let control_stop = Arc::clone(&self.control_stop);
 
             Some(tokio::task::spawn_blocking(move || {
                 tracing::debug!("Control channel thread started (5ms poll)");
                 loop {
+                    // MODIFIED (Playfruit): cooperative exit — checked every 5ms tick.
+                    if control_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        tracing::debug!("Control channel thread stopping");
+                        break;
+                    }
                     // Use raw receive to handle all packet formats (including
                     // retransmit requests which have 8-byte headers without SSRC).
                     // 5ms timeout keeps retransmit latency low.
@@ -1197,6 +1212,7 @@ impl Connection {
             None
         };
 
+        self.control_stop.store(false, std::sync::atomic::Ordering::Relaxed);
         self.streamer = Some(streamer);
         self.control_task = control_task;
         self.playback_state = PlaybackState::Playing;
@@ -1270,10 +1286,16 @@ impl Connection {
             let streamer_clone = streamer.clone();
             let rt_handle = tokio::runtime::Handle::current();
             let stats = Arc::clone(&self.stream_stats);
+            let control_stop = Arc::clone(&self.control_stop);
 
             Some(tokio::task::spawn_blocking(move || {
                 tracing::debug!("Control channel thread started for live streaming (5ms poll)");
                 loop {
+                    // MODIFIED (Playfruit): cooperative exit — checked every 5ms tick.
+                    if control_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        tracing::debug!("Control channel thread stopping");
+                        break;
+                    }
                     match control_rx_clone.recv_raw_timeout(std::time::Duration::from_millis(5)) {
                         Ok(Some((data, _addr))) => {
                             if data.len() < 4 {
@@ -1323,6 +1345,7 @@ impl Connection {
             None
         };
 
+        self.control_stop.store(false, std::sync::atomic::Ordering::Relaxed);
         self.streamer = Some(streamer);
         self.control_task = control_task;
         self.playback_state = PlaybackState::Playing;
@@ -1374,6 +1397,8 @@ impl Connection {
 
     /// Stop streaming.
     pub async fn stop(&mut self) -> Result<()> {
+        // MODIFIED (Playfruit): stop the control-loop blocking task.
+        self.control_stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(ref mut streamer) = self.streamer {
             streamer.stop().await?;
         }
@@ -1403,6 +1428,12 @@ impl Connection {
     }
 
     /// Get the total buffer underruns from this connection's streamer (0 if no streamer).
+    /// MODIFIED (Playfruit): inbound NTP timing requests answered; None before
+    /// setup. Zero after ~10s of streaming = receiver cannot reach us (firewall).
+    pub fn timing_request_count(&self) -> Option<u64> {
+        self.timing_server.as_ref().map(|s| s.request_count())
+    }
+
     pub fn streamer_underruns(&self) -> u64 {
         self.streamer.as_ref().map_or(0, |s| s.underruns())
     }

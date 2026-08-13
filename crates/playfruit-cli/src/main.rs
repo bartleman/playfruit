@@ -10,6 +10,17 @@ use std::net::IpAddr;
 use playfruit_cli::{Engine, EngineConfig, EngineStatus};
 use cap_core::streaming::LatencyProfile;
 
+mod doctor;
+
+/// Where the apps write their logs — printed by `doctor` for bug reports.
+fn log_dir_hint() -> String {
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("playfruit").display().to_string()
+}
+
 struct Args {
     ip: IpAddr,
     volume: f32,
@@ -69,6 +80,13 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
+    // `playfruit doctor [ip]` — diagnostic mode, quiet by default (no
+    // tracing subscriber: check output IS the diagnosis).
+    if std::env::args().nth(1).as_deref() == Some("doctor") {
+        let ip = std::env::args().nth(2).and_then(|s| s.parse().ok());
+        std::process::exit(doctor::run(ip));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -99,6 +117,12 @@ fn main() {
                 EngineStatus::Connecting { name } => println!("connecting to {name}…"),
                 EngineStatus::Streaming { name } => {
                     println!("✓ streaming to {name} — Ctrl-C to stop")
+                }
+                EngineStatus::StreamingSilent { name } => {
+                    println!("· connected to {name} — nothing is playing on this PC")
+                }
+                EngineStatus::Warning { name, message } => {
+                    eprintln!("⚠ {name}: {message}")
                 }
                 EngineStatus::Reconnecting { name, attempt } => {
                     println!("↻ reconnecting to {name} (attempt {attempt})…")

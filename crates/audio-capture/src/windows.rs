@@ -38,10 +38,13 @@ use crate::{Capture, CaptureError, CaptureFormat, CapturedFrame};
 /// backend `parec` para que el pipeline vea el mismo tamaño en ambos OS.
 const CHUNK_FRAMES: usize = 352;
 
-/// Timeout del `wait_for_event` (ms). Si Windows deja de enviar eventos
-/// durante este tiempo, salimos del loop con error (driver colgado, audio
-/// device desconectado, etc.).
-const EVENT_TIMEOUT_MS: u32 = 3_000;
+/// Timeout of each `wait_for_event` slice (ms). WASAPI loopback only fires
+/// events while something is RENDERING to the endpoint — a quiet PC is
+/// normal, not a driver failure, so a timeout means "idle", never death.
+/// Short slices also keep shutdown latency low. Genuine device failure is
+/// detected where it actually surfaces: `read_from_device_to_deque` errors
+/// (e.g. AUDCLNT_E_DEVICE_INVALIDATED).
+const EVENT_TIMEOUT_MS: u32 = 250;
 
 pub struct WindowsCapture {
     name: String,
@@ -245,13 +248,10 @@ fn capture_thread_main(
         }
 
         if h_event.wait_for_event(EVENT_TIMEOUT_MS).is_err() {
-            // Si el running ya está a false, es un shutdown ordenado.
-            if !running.load(Ordering::SeqCst) {
-                break;
-            }
-            tracing::error!("wait_for_event timeout — driver de audio sin respuesta");
-            let _ = audio_client.stop_stream();
-            return Err("wait_for_event timeout".into());
+            // Idle endpoint (nothing playing) or orderly shutdown — loop back
+            // around. `running` gates the loop; real device death surfaces as
+            // a read_from_device_to_deque error above and exits with Err.
+            continue;
         }
     }
 

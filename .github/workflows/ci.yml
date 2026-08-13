@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace --locked --release
       - name: Build
         run: cargo build --release --locked -p playfruit-cli -p playfruit-tray
       - name: Build protocol test
@@ -26,7 +28,7 @@ jobs:
           mkdir stage
           cp target/release/playfruit.exe target/release/playfruit-tray.exe stage/
           cp target/release/examples/click_cli.exe stage/
-          cp LICENSE README.md stage/
+          cp LICENSE README.md FIELD_TEST.md stage/
       - uses: actions/upload-artifact@v4
         with:
           name: playfruit-windows
@@ -41,6 +43,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check workspace
         run: cargo check --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked --release
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -62,7 +66,9 @@ jobs:
           playfruit-tray.exe — the app. Run it, right-click the tray circle,
                                pick your HomePod under "Stream to".
           playfruit.exe      — command-line version: playfruit <homepod-ip>
+                               diagnostics: playfruit doctor <homepod-ip>
           click_cli.exe      — latency test: click_cli <homepod-ip> 12 0.35
+          FIELD_TEST.md      — the 10-minute test protocol; run it first.
 
           First run: SmartScreen warns (unsigned build): More info -> Run anyway.
           Then click "Enable firewall access..." in the tray menu (one admin

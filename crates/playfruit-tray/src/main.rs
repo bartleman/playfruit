@@ -30,7 +30,10 @@ mod firewall {
         std::env::current_exe().ok()
     }
 
-    /// Readable without elevation.
+    /// Readable without elevation. Rules only count if they apply to ALL
+    /// network profiles: home networks frequently sit on the Public profile,
+    /// and a Private-only rule silently blocks the HomePod's inbound timing
+    /// queries there (symptom: connects fine, plays silence).
     pub fn rules_installed() -> bool {
         Command::new("netsh")
             .args([
@@ -39,15 +42,31 @@ mod firewall {
                 "show",
                 "rule",
                 &format!("name={RULE_NAME}"),
+                "verbose",
             ])
             .output()
-            .map(|o| o.status.success())
+            .map(|o| {
+                if !o.status.success() {
+                    return false;
+                }
+                let text = String::from_utf8_lossy(&o.stdout);
+                // Every profile line must be unrestricted; a v0.1.1-era
+                // "Private,Domain" rule reads as not-installed so the setup
+                // item reappears and upgrades it.
+                text.lines()
+                    .filter(|l| l.trim_start().starts_with("Profiles:"))
+                    .all(|l| l.contains("Any") || (l.contains("Public") && l.contains("Private")))
+                    && text.contains(RULE_NAME)
+            })
             .unwrap_or(false)
     }
 
     /// Adds inbound allow rules for the tray exe (and the CLI exe if it sits
-    /// next to it), UDP+TCP, private/domain profiles only. Must run elevated.
+    /// next to it), UDP+TCP, ALL profiles — program-scoped, so this matches
+    /// what Windows' own "Allow access" dialog grants when the public-networks
+    /// box is ticked. Replaces any older narrower rule. Must run elevated.
     pub fn install() -> bool {
+        remove(); // drop any stale/narrower rule set first (idempotent)
         let Some(exe) = exe() else { return false };
         let mut programs = vec![exe.clone()];
         if let Some(dir) = exe.parent() {
@@ -70,7 +89,7 @@ mod firewall {
                         "action=allow",
                         &format!("program={}", program.display()),
                         &format!("protocol={proto}"),
-                        "profile=private,domain",
+                        "profile=any",
                     ])
                     .status()
                     .map(|s| s.success())
@@ -156,13 +175,30 @@ fn save_config(cfg: &Config) {
     }
 }
 
-/// Simple generated icon: filled circle, gray when idle, green when streaming.
-fn make_icon(streaming: bool) -> Icon {
+/// Tray icon states — color is the primary at-a-glance signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconState {
+    /// Gray: not connected.
+    Idle,
+    /// Yellow: connecting or reconnecting.
+    Busy,
+    /// Green: streaming real audio.
+    Streaming,
+    /// Pale green: connected but the PC is producing no audio.
+    Silent,
+    /// Red: stopped on an error that needs the user.
+    Failed,
+}
+
+/// Simple generated icon: filled circle, color per state.
+fn make_icon(state: IconState) -> Icon {
     const S: i32 = 32;
-    let (r, g, b) = if streaming {
-        (52u8, 199u8, 89u8)
-    } else {
-        (142u8, 142u8, 147u8)
+    let (r, g, b) = match state {
+        IconState::Idle => (142u8, 142u8, 147u8),
+        IconState::Busy => (255, 204, 0),
+        IconState::Streaming => (52, 199, 89),
+        IconState::Silent => (134, 214, 164),
+        IconState::Failed => (255, 69, 58),
     };
     let mut rgba = Vec::with_capacity((S * S * 4) as usize);
     for y in 0..S {
@@ -196,10 +232,15 @@ struct Speaker {
     kind: DeviceKind,
 }
 
-fn scan_speakers(rt: &tokio::runtime::Runtime) -> Vec<Speaker> {
-    let devices = rt
-        .block_on(browse_once(Duration::from_secs(2)))
-        .unwrap_or_default();
+/// Off-thread scan: results come back on the channel, UI never blocks.
+fn spawn_scan(rt: &tokio::runtime::Runtime, tx: std::sync::mpsc::Sender<Vec<Speaker>>) {
+    rt.spawn(async move {
+        let devices = browse_once(Duration::from_secs(2)).await.unwrap_or_default();
+        let _ = tx.send(filter_speakers(devices));
+    });
+}
+
+fn filter_speakers(devices: Vec<cap_core::discovery::Device>) -> Vec<Speaker> {
     let mut out: Vec<Speaker> = Vec::new();
     for d in devices {
         // RAOP entries repeat the AirPlay ones under "MAC@Name"; skip them.
@@ -254,6 +295,7 @@ struct App {
     status_item: MenuItem,
     firewall_item: MenuItem,
     firewall_poll_until: Option<Instant>,
+    firewall_poll_last: Instant,
     devices_menu: Submenu,
     device_items: Vec<(CheckMenuItem, Speaker)>,
     latency_items: Vec<(CheckMenuItem, LatencyProfile)>,
@@ -262,10 +304,10 @@ struct App {
 }
 
 impl App {
-    fn set_status_text(&self, text: &str, streaming: bool) {
+    fn set_status_text(&self, text: &str, state: IconState) {
         self.status_item.set_text(format!("Playfruit — {text}"));
         let _ = self.tray.set_tooltip(Some(format!("Playfruit — {text}")));
-        let _ = self.tray.set_icon(Some(make_icon(streaming)));
+        let _ = self.tray.set_icon(Some(make_icon(state)));
     }
 
     fn refresh_checks(&self) {
@@ -285,7 +327,7 @@ impl App {
 
     fn connect(&mut self, sp: Speaker) {
         if let Some(e) = self.engine.take() {
-            e.stop();
+            e.stop_detached();
         }
         let (engine, rx) = Engine::start(EngineConfig {
             ip: sp.ip,
@@ -305,10 +347,10 @@ impl App {
 
     fn disconnect(&mut self) {
         if let Some(e) = self.engine.take() {
-            e.stop();
+            e.stop_detached();
         }
         self.status_rx = None;
-        self.set_status_text("idle", false);
+        self.set_status_text("idle", IconState::Idle);
         self.refresh_checks();
     }
 
@@ -319,6 +361,25 @@ impl App {
                 self.connect(sp);
             }
         }
+    }
+
+    fn show_scanning_placeholder(&mut self) {
+        for (item, _) in &self.device_items {
+            let _ = self.devices_menu.remove(item);
+        }
+        self.device_items.clear();
+        let placeholder =
+            CheckMenuItem::with_id("dev:none", "Scanning…", false, false, None);
+        let _ = self.devices_menu.append(&placeholder);
+        self.device_items.push((
+            placeholder,
+            Speaker {
+                name: String::new(),
+                ip: IpAddr::from([0, 0, 0, 0]),
+                port: 0,
+                kind: DeviceKind::OtherAirPlay,
+            },
+        ));
     }
 
     fn rebuild_device_items(&mut self, speakers: Vec<Speaker>) {
@@ -382,6 +443,11 @@ fn main() {
     // Log to a file: the windowed subsystem has no console.
     let log_dir = config_dir();
     let _ = std::fs::create_dir_all(&log_dir);
+    // Keep the previous session's log — it's the crash evidence.
+    let _ = std::fs::rename(
+        log_dir.join("playfruit-tray.log"),
+        log_dir.join("playfruit-tray.prev.log"),
+    );
     if let Ok(file) = std::fs::File::create(log_dir.join("playfruit-tray.log")) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
@@ -414,7 +480,8 @@ fn main() {
         !firewall_ready_at_start,
         None,
     );
-    let devices_menu = Submenu::new("Stream to", true);
+    let devices_menu = Submenu::new("Mirror PC audio to", true);
+    let caption_item = MenuItem::with_id("caption", "Sends what your PC speakers play", false, None);
     let rescan_item = MenuItem::with_id("rescan", "Rescan devices", true, None);
 
     let latency_menu = Submenu::new("Latency", true);
@@ -452,6 +519,7 @@ fn main() {
 
     let _ = menu.append_items(&[
         &status_item,
+        &caption_item,
         &firewall_item,
         &PredefinedMenuItem::separator(),
         &devices_menu,
@@ -467,7 +535,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Playfruit — idle")
-        .with_icon(make_icon(false))
+        .with_icon(make_icon(IconState::Idle))
         .build()
         .expect("tray icon");
 
@@ -480,6 +548,7 @@ fn main() {
         status_item,
         firewall_item,
         firewall_poll_until: None,
+        firewall_poll_last: Instant::now(),
         devices_menu,
         device_items: Vec::new(),
         latency_items,
@@ -487,15 +556,17 @@ fn main() {
         disconnect_item,
     };
 
-    // Initial device scan.
-    let speakers = scan_speakers(&rt);
-    app.rebuild_device_items(speakers);
+    // Device scans run off-thread; results arrive on a channel polled in the
+    // event loop so the UI never blocks on mDNS.
+    let (scan_tx, scan_rx) = std::sync::mpsc::channel::<Vec<Speaker>>();
+    spawn_scan(&rt, scan_tx.clone());
+    app.show_scanning_placeholder();
     app.refresh_checks();
 
     if firewall_ready_at_start {
         app.firewall_item.set_text("Firewall access enabled ✓");
     } else {
-        app.set_status_text("setup: enable firewall access below", false);
+        app.set_status_text("setup: enable firewall access below", IconState::Idle);
     }
 
     let menu_rx = MenuEvent::receiver();
@@ -509,9 +580,12 @@ fn main() {
             match id.as_str() {
                 "quit" => {
                     if let Some(e) = app.engine.take() {
-                        e.stop();
+                        // Detached: never join on the UI thread. Give the
+                        // TEARDOWN a short grace so the HomePod releases the
+                        // session promptly, then exit hard.
+                        e.stop_detached();
+                        std::thread::sleep(Duration::from_millis(400));
                     }
-                    // Hard exit: vendored retransmit loop has no shutdown.
                     std::process::exit(0);
                 }
                 "disconnect" => app.disconnect(),
@@ -526,8 +600,8 @@ fn main() {
                     }
                 }
                 "rescan" => {
-                    let speakers = scan_speakers(&rt);
-                    app.rebuild_device_items(speakers);
+                    spawn_scan(&rt, scan_tx.clone());
+                    app.show_scanning_placeholder();
                 }
                 other => {
                     if let Some(idx) = other.strip_prefix("dev:").and_then(|s| s.parse::<usize>().ok()) {
@@ -565,12 +639,15 @@ fn main() {
         // Firewall rule install poll (after the UAC elevation round-trip).
         #[cfg(windows)]
         if let Some(deadline) = app.firewall_poll_until {
-            if firewall::rules_installed() {
+            // netsh spawn is ~50-100ms; throttle to 1/s instead of every tick.
+            if app.firewall_poll_last.elapsed() < Duration::from_secs(1) {
+                // skip this tick
+            } else if { app.firewall_poll_last = Instant::now(); firewall::rules_installed() } {
                 app.firewall_poll_until = None;
                 app.firewall_item.set_text("Firewall access enabled ✓");
                 app.firewall_item.set_enabled(false);
                 if app.engine.is_none() {
-                    app.set_status_text("idle", false);
+                    app.set_status_text("idle", IconState::Idle);
                 }
             } else if Instant::now() > deadline {
                 app.firewall_poll_until = None;
@@ -579,29 +656,49 @@ fn main() {
             }
         }
 
-        // Engine status → tray UI.
-        let mut status_update: Option<(String, bool, bool)> = None; // (text, streaming, clear_engine)
+        // Scan results → device submenu (never blocks).
+        while let Ok(speakers) = scan_rx.try_recv() {
+            app.rebuild_device_items(speakers);
+        }
+
+        // Engine status → tray UI. Paint FIRST, then tear down (detached), so
+        // failure text always renders and the UI thread never joins anything.
+        let mut status_update: Option<(String, IconState, bool)> = None; // (text, icon, clear_engine)
         if let Some(rx) = &app.status_rx {
             while let Ok(st) = rx.try_recv() {
                 status_update = Some(match st {
-                    EngineStatus::Connecting { name } => (format!("connecting to {name}…"), false, false),
-                    EngineStatus::Streaming { name } => (format!("streaming to {name}"), true, false),
-                    EngineStatus::Reconnecting { name, attempt } => {
-                        (format!("reconnecting to {name} (attempt {attempt})…"), false, false)
+                    EngineStatus::Connecting { name } => {
+                        (format!("connecting to {name}…"), IconState::Busy, false)
                     }
-                    EngineStatus::Failed(e) => (format!("failed: {e}"), false, true),
-                    EngineStatus::Stopped => ("idle".to_string(), false, true),
+                    EngineStatus::Streaming { name } => {
+                        (format!("streaming to {name}"), IconState::Streaming, false)
+                    }
+                    EngineStatus::StreamingSilent { name } => (
+                        format!("connected to {name} — nothing is playing on this PC"),
+                        IconState::Silent,
+                        false,
+                    ),
+                    EngineStatus::Warning { name, message } => {
+                        (format!("{name}: {message}"), IconState::Failed, false)
+                    }
+                    EngineStatus::Reconnecting { name, attempt } => (
+                        format!("reconnecting to {name} (attempt {attempt})…"),
+                        IconState::Busy,
+                        false,
+                    ),
+                    EngineStatus::Failed(e) => (format!("stopped: {e}"), IconState::Failed, true),
+                    EngineStatus::Stopped => ("idle".to_string(), IconState::Idle, true),
                 });
             }
         }
-        if let Some((text, streaming, clear)) = status_update {
+        if let Some((text, icon, clear)) = status_update {
+            app.set_status_text(&text, icon);
             if clear {
                 if let Some(e) = app.engine.take() {
-                    e.stop();
+                    e.stop_detached();
                 }
                 app.status_rx = None;
             }
-            app.set_status_text(&text, streaming);
             app.refresh_checks();
         }
     });

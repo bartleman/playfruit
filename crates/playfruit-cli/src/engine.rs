@@ -33,6 +33,13 @@ pub struct EngineConfig {
 pub enum EngineStatus {
     Connecting { name: String },
     Streaming { name: String },
+    /// Connected and healthy, but the capture source has produced no real
+    /// (non-zero) audio for a few seconds — usually "nothing is playing on
+    /// this PC", the most common no-sound cause and user-fixable.
+    StreamingSilent { name: String },
+    /// Session is up but something needs user attention (e.g. the receiver's
+    /// clock-sync queries never arrive — firewall blocking inbound UDP).
+    Warning { name: String, message: String },
     Reconnecting { name: String, attempt: u32 },
     Failed(String),
     Stopped,
@@ -64,6 +71,12 @@ impl Engine {
                     .build()
                     .expect("engine runtime");
                 rt.block_on(supervise(config, stop_thread, status_tx));
+                // Abandon instead of dropping: Runtime::drop waits forever for
+                // spawn_blocking tasks, and the vendored control loop is one
+                // (now stoppable via our vendor patch, but shutdown_background
+                // keeps stop() prompt even if a future session leaves one
+                // behind). Leaked worst case: one near-idle thread per session.
+                rt.shutdown_background();
             })
             .expect("engine thread");
         (
@@ -80,6 +93,20 @@ impl Engine {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+
+    /// Signals stop and reaps the engine thread on a background thread, so
+    /// callers on UI threads never block on teardown (worst case ~3s of
+    /// session teardown happens out of sight).
+    pub fn stop_detached(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = std::thread::Builder::new()
+                .name("playfruit-engine-reaper".into())
+                .spawn(move || {
+                    let _ = t.join();
+                });
         }
     }
 }
@@ -133,14 +160,27 @@ async fn supervise(
         };
         // Bound the connect: a black-holed IP would otherwise block for ~20 s
         // inside pairing, freezing Engine::stop (and the tray UI) with it.
+        // Also poll the stop flag so Engine::stop stays prompt mid-connect.
         let connect = tokio::time::timeout(
             Duration::from_secs(10),
             open_live_stream(descriptor, Some(config.volume), Some(config.latency)),
         );
-        let handle =
-            match connect.await.unwrap_or_else(|_| {
+        let stop_poll = stop.clone();
+        let connect_result = tokio::select! {
+            r = connect => r.unwrap_or_else(|_| {
                 Err(cap_core::streaming::StreamError::Client("connect timed out".into()))
-            }) {
+            }),
+            _ = async move {
+                loop {
+                    if stop_poll.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => break 'sessions,
+        };
+        let handle =
+            match connect_result {
                 Ok(h) => h,
                 Err(e) => {
                     tracing::warn!(error = %e, attempt, "connect failed");
@@ -193,16 +233,28 @@ async fn supervise(
         }
 
         let dead = Arc::new(AtomicBool::new(false));
+        // Milliseconds since session epoch of the last NON-ZERO capture frame;
+        // u64::MAX = none yet. Written by the pump, read by the health task.
+        let last_audio_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let session_epoch = Instant::now();
         let hb_dead = dead.clone();
         let hb_conn = connection.clone();
+        let hb_status = status.clone();
+        let hb_name = config.name.clone();
+        let hb_last_audio = last_audio_ms.clone();
         let heartbeat_task = tokio::spawn(async move {
             let mut strikes: u32 = 0;
+            let mut silent_reported = false;
+            let mut timing_warned = false;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await; // skip immediate tick
             loop {
                 interval.tick().await;
-                let result = { hb_conn.lock().await.send_feedback().await };
+                let (result, timing_count) = {
+                    let mut conn = hb_conn.lock().await;
+                    (conn.send_feedback().await, conn.timing_request_count())
+                };
                 match result {
                     Ok(()) => strikes = 0,
                     Err(e) => {
@@ -214,6 +266,44 @@ async fn supervise(
                         }
                     }
                 }
+
+                let age = session_epoch.elapsed();
+
+                // Firewall tell: the HomePod queries our clock several times a
+                // second when it can reach us. Zero queries after 10s means
+                // inbound UDP is blocked and the speaker will play silence.
+                if !timing_warned && age > Duration::from_secs(10) && timing_count == Some(0) {
+                    timing_warned = true;
+                    tracing::warn!(
+                        "no inbound timing requests after 10s — Windows Firewall is \
+                         likely blocking UDP (check firewall access + network profile)"
+                    );
+                    let _ = hb_status.send(EngineStatus::Warning {
+                        name: hb_name.clone(),
+                        message: "HomePod can't sync its clock — audio will stay silent. \
+                                  Re-run 'Enable firewall access' in the menu."
+                            .into(),
+                    });
+                }
+
+                // Silence tell: connected but the PC isn't producing audio —
+                // normal (nothing playing), so it's a state, not an error.
+                if age > Duration::from_secs(5) && !timing_warned {
+                    let last = hb_last_audio.load(Ordering::Relaxed);
+                    let real_recent = last != u64::MAX
+                        && age.as_millis() as u64 - last < 3_000;
+                    if !real_recent && !silent_reported {
+                        silent_reported = true;
+                        let _ = hb_status.send(EngineStatus::StreamingSilent {
+                            name: hb_name.clone(),
+                        });
+                    } else if real_recent && silent_reported {
+                        silent_reported = false;
+                        let _ = hb_status.send(EngineStatus::Streaming {
+                            name: hb_name.clone(),
+                        });
+                    }
+                }
             }
         });
 
@@ -221,8 +311,18 @@ async fn supervise(
         let pump_rx = rx.clone();
         let pump_stop = stop.clone();
         let pump_dead = dead.clone();
+        let pump_last_audio = last_audio_ms.clone();
         let exit = tokio::task::spawn_blocking(move || {
-            pump_loop(pump_rx, sender, sample_rate, channels, pump_stop, pump_dead)
+            pump_loop(
+                pump_rx,
+                sender,
+                sample_rate,
+                channels,
+                pump_stop,
+                pump_dead,
+                pump_last_audio,
+                session_epoch,
+            )
         })
         .await
         .unwrap_or(PumpExit::SessionDead);
@@ -276,6 +376,8 @@ fn pump_loop(
     channels: u8,
     stop: Arc<AtomicBool>,
     dead: Arc<AtomicBool>,
+    last_audio_ms: Arc<AtomicU64>,
+    session_epoch: Instant,
 ) -> PumpExit {
     let ch = channels as usize;
     let start = Instant::now();
@@ -296,7 +398,17 @@ fn pump_loop(
             return PumpExit::SessionDead;
         }
         let mut samples = match rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(frame) => frame.samples,
+            Ok(frame) => {
+                // Real (non-digital-silence) audio powers the StreamingSilent
+                // state machine in the health task.
+                if frame.samples.iter().any(|&s| s != 0) {
+                    last_audio_ms.store(
+                        session_epoch.elapsed().as_millis() as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+                frame.samples
+            }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 // Capture silent — keep the stream timeline fed in real time.
                 vec![0i16; SILENCE_FRAMES * ch]
@@ -359,5 +471,122 @@ fn pump_loop(
             );
             last_report = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cap_core::streaming::LiveAudioDecoder;
+
+    fn test_channel() -> (
+        crossbeam_channel::Sender<audio_capture::CapturedFrame>,
+        crossbeam_channel::Receiver<audio_capture::CapturedFrame>,
+    ) {
+        crossbeam_channel::bounded(64)
+    }
+
+    /// Regression: the tray froze because stopping never returned. The pump
+    /// must exit promptly when the stop flag is raised, even with a silent
+    /// capture source.
+    #[test]
+    fn pump_stop_is_prompt() {
+        let (_tx, rx) = test_channel();
+        let (sender, _decoder) = LiveAudioDecoder::create_pair(44_100, 2, 64);
+        let stop = Arc::new(AtomicBool::new(false));
+        let dead = Arc::new(AtomicBool::new(false));
+        let last_audio = Arc::new(AtomicU64::new(u64::MAX));
+        let epoch = Instant::now();
+
+        let stop_setter = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stop_setter.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let exit = pump_loop(rx, sender, 44_100, 2, stop, dead, last_audio, epoch);
+        assert!(matches!(exit, PumpExit::Stopped));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "pump took {:?} to stop",
+            started.elapsed()
+        );
+    }
+
+    /// Regression: a dead vendored streamer (closed frame channel) must be
+    /// detected as SessionDead instead of reporting Streaming forever.
+    #[test]
+    fn pump_detects_unresponsive_sender() {
+        let (_tx, rx) = test_channel();
+        // Tiny queue with no consumer: try_send fails permanently once full,
+        // mimicking a dead streamer task.
+        let (sender, _decoder) = LiveAudioDecoder::create_pair(44_100, 2, 1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let dead = Arc::new(AtomicBool::new(false));
+        let last_audio = Arc::new(AtomicU64::new(u64::MAX));
+
+        let started = Instant::now();
+        let exit = pump_loop(
+            rx,
+            sender,
+            44_100,
+            2,
+            stop,
+            dead,
+            last_audio,
+            Instant::now(),
+        );
+        assert!(matches!(exit, PumpExit::SessionDead));
+        // 250 consecutive failures at ~20ms keepalive cadence ≈ 5s + margin.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "dead-sender detection took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Regression: capture channel disconnect must surface as CaptureDied.
+    #[test]
+    fn pump_reports_capture_death() {
+        let (tx, rx) = test_channel();
+        let (sender, _decoder) = LiveAudioDecoder::create_pair(44_100, 2, 64);
+        let stop = Arc::new(AtomicBool::new(false));
+        let dead = Arc::new(AtomicBool::new(false));
+        drop(tx);
+        let exit = pump_loop(
+            rx,
+            sender,
+            44_100,
+            2,
+            stop,
+            dead,
+            Arc::new(AtomicU64::new(u64::MAX)),
+            Instant::now(),
+        );
+        assert!(matches!(exit, PumpExit::CaptureDied));
+    }
+
+    /// Regression: Engine::stop must return promptly in every phase, even
+    /// mid-connect against a black-holed address (192.0.2.1, TEST-NET) and
+    /// regardless of whether the capture layer initialized. This is THE
+    /// tray-freeze test.
+    #[test]
+    fn engine_stop_is_prompt_during_connect() {
+        let (engine, _status) = Engine::start(EngineConfig {
+            ip: "192.0.2.1".parse().unwrap(),
+            port: 7000,
+            name: "blackhole".into(),
+            volume: 0.1,
+            latency: LatencyProfile::Gaming,
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        engine.stop();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "Engine::stop took {:?}",
+            started.elapsed()
+        );
     }
 }

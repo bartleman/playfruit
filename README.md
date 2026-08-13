@@ -20,9 +20,12 @@ impose.
   bundled `click_cli` test tool)
 - ✅ Clock-drift regulation for multi-hour streams, silence keepalive
   (quiet periods don't kill the session), auto-reconnect with backoff
-- ⚠️ **The Windows system-audio capture path (WASAPI) compiles and is CI-built,
-  but has not yet been field-tested on real Windows hardware.** Treat releases
-  as pre-release quality until this note disappears.
+- ⚠️ **Windows field-testing is in progress.** The first field test found
+  (and we fixed) a firewall-profile gap, a capture-layer bug, and a UI hang;
+  the fixes ship with `playfruit doctor` + engine regression tests, but the
+  full pipeline has not yet been confirmed working end-to-end on real
+  Windows hardware. Treat releases as pre-release quality until this note
+  disappears.
 
 ## Install
 
@@ -35,20 +38,21 @@ First run on Windows:
 - **SmartScreen** warns because the binaries are unsigned: *More info →
   Run anyway*.
 - **Firewall**: click **"Enable firewall access…"** in the tray menu — one
-  administrator approval adds a precise inbound rule for Playfruit (private
-  networks only), and you're done permanently. This is required because
-  AirPlay receivers send timing/sync packets *back* to the app over UDP;
-  without the rule you get silence. (If you skip it, Windows shows its own
-  firewall dialog instead — choose Allow. `--remove-firewall` cleans the
-  rule up if you ever uninstall.)
+  administrator approval adds a program-scoped inbound rule covering ALL
+  network profiles (home networks are often set to "Public", where narrower
+  rules silently don't apply). This is required because AirPlay receivers
+  send timing/sync packets *back* to the app over UDP; without it the
+  HomePod connects but plays silence. `--remove-firewall` cleans up on
+  uninstall.
 
 ## Using the tray app
 
 Run `playfruit-tray.exe`. A gray circle appears in the system tray (check
 the `^` overflow area near the clock). Right-click it:
 
-- **Stream to** — HomePods and Apple TVs discovered on your network;
-  click one to connect. The icon turns green while streaming.
+- **Mirror PC audio to** — HomePods and Apple TVs discovered on your
+  network; click one to connect. Playfruit mirrors whatever your PC's
+  default output plays (it does not appear as a separate playback device).
 - **Latency** — `Gaming` (~0.5 s, default, best for live sports),
   `Video` (~0.6 s, steadier), `Music` (~0.7 s, most robust). If audio
   stutters or "robotizes" on busy Wi-Fi, step down toward `Music`.
@@ -74,11 +78,26 @@ Test tools (in `crates/airplay-core/examples/`):
 - `tone_cli <ip> [secs] [hz] [amp]` — stream a sine tone
 - `probe_cli <ip>` / `pair_cli <ip>` — silent protocol/pairing checks
 
+## Diagnosing problems
+
+`playfruit doctor <homepod-ip>` checks the whole pipeline in ~30 seconds:
+firewall rules (including whether they cover your active network profile),
+audio capture (frames/sec and whether real audio is flowing), device
+discovery, reachability, and — the decisive one — whether the HomePod's
+clock-sync queries actually reach this PC (if they don't, the stream is
+silent; that's the most common failure). See [FIELD_TEST.md](FIELD_TEST.md)
+for the full 10-minute test protocol.
+
+The tray icon tells the story at a glance: gray idle, yellow connecting or
+reconnecting, **green streaming**, *pale green* connected-but-the-PC-is-silent
+("nothing is playing"), red stopped-on-error (status line names the cause).
+
 ## Troubleshooting
 
-- **Silence but the app says streaming** — almost always the firewall;
-  use "Enable firewall access…" in the tray menu, or re-check that inbound
-  UDP is allowed for the app on private networks.
+- **Silence but the app says streaming** — run `playfruit doctor <ip>`;
+  a failing `clock-sync` check means the firewall is blocking the HomePod's
+  timing queries: re-run "Enable firewall access…" (it upgrades old rules
+  to cover Public-profile networks).
 - **Stutter / robotized audio** — Wi-Fi congestion; switch the latency
   profile to `Video` or `Music`, prefer Ethernet on the PC, or move the
   HomePod closer to the access point.
@@ -130,6 +149,12 @@ hard protocol work is theirs.
 - `airplay-audio/Cargo.toml`, `src/encoder.rs`, `src/lib.rs` — the AAC
   encoder is feature-gated off by default (`fdk-aac` is GPL-incompatible and
   unnecessary: streaming uses ALAC).
+- `airplay-client/src/connection.rs` — the retransmit control loop gets a
+  cooperative shutdown flag (it previously ran forever and blocked runtime
+  shutdown), plus a `timing_request_count()` accessor.
+- `airplay-timing/src/ntp.rs` — counts inbound timing requests so the app
+  can detect a receiver that cannot reach us (firewall) instead of playing
+  silence with no explanation.
 
 Comments in inherited code are partly in Spanish (upstream's language);
 they're welcome to stay, and translation PRs are equally welcome.

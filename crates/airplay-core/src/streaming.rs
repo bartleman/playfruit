@@ -8,8 +8,8 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ap2rs_audio::{AlacEncoder, LiveAudioDecoder};
-pub use ap2rs_audio::{LiveFrameSender, LivePcmFrame};
+use ap2rs_audio::AlacEncoder;
+pub use ap2rs_audio::{LiveAudioDecoder, LiveFrameSender, LivePcmFrame};
 pub use ap2rs_client::Connection;
 use ap2rs_core::codec::{AudioCodec, AudioFormat};
 use ap2rs_core::stream::{PtpMode, StreamConfig, StreamType, TimingProtocol};

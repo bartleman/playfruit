@@ -1,3 +1,5 @@
+// MODIFIED from upstream Pabldi08/airplay2-rs @1baeaae (Playfruit local patch):
+// inbound timing-request counter + accessor for firewall-blockage detection.
 //! NTP-like timing for AirPlay 1 devices.
 //!
 //! Uses RTP packet types 82 (request) and 83 (response).
@@ -363,9 +365,19 @@ pub struct NtpTimingServer {
     port: u16,
     shutdown_tx: watch::Sender<bool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
+    // MODIFIED (Playfruit): count inbound timing requests so callers can
+    // detect a receiver that cannot reach us (firewall) — the top cause of
+    // "connected but silent" on Windows.
+    requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NtpTimingServer {
+    /// Inbound timing requests answered so far. Zero after ~10s of streaming
+    /// means the receiver cannot reach us (almost always Windows Firewall).
+    pub fn request_count(&self) -> u64 {
+        self.requests.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Bind to a random port and start the background listener.
     pub async fn start(sample_rate: u32) -> Result<Self> {
         let socket = TokioUdpSocket::bind("0.0.0.0:0").await?;
@@ -376,8 +388,10 @@ impl NtpTimingServer {
         let clock = Clock::new(sample_rate);
 
         let task_socket = socket.clone();
+        let requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let requests_task = requests.clone();
         let task_handle = tokio::spawn(async move {
-            Self::run_loop(task_socket, clock, shutdown_rx).await;
+            Self::run_loop(task_socket, clock, shutdown_rx, requests_task).await;
         });
 
         Ok(Self {
@@ -385,6 +399,7 @@ impl NtpTimingServer {
             port,
             shutdown_tx,
             task_handle: Some(task_handle),
+            requests,
         })
     }
 
@@ -405,6 +420,7 @@ impl NtpTimingServer {
         socket: Arc<TokioUdpSocket>,
         clock: Clock,
         mut shutdown_rx: watch::Receiver<bool>,
+        requests: Arc<std::sync::atomic::AtomicU64>,
     ) {
         let mut buf = [0u8; 64];
         loop {
@@ -416,7 +432,12 @@ impl NtpTimingServer {
                             let send_time = clock.now_ntp();
                             let response = NtpResponse::from_request(&request, recv_time, send_time);
                             let _ = socket.send_to(&response.serialize(), addr).await;
-                            tracing::debug!("NTP timing: responded to request seq={}", request.sequence);
+                            let n = requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if n == 1 || n % 100 == 0 {
+                                tracing::info!("NTP timing: {} request(s) answered (receiver clock sync healthy)", n);
+                            } else {
+                                tracing::debug!("NTP timing: responded to request seq={}", request.sequence);
+                            }
                         }
                     }
                 }
