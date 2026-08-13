@@ -65,8 +65,9 @@ jobs:
           click_cli.exe      — latency test: click_cli <homepod-ip> 12 0.35
 
           First run: SmartScreen warns (unsigned build): More info -> Run anyway.
-          Windows Firewall will ask for network access: allow on private
-          networks — the HomePod sends timing packets back to the app.
+          Then click "Enable firewall access..." in the tray menu (one admin
+          approval) — the HomePod sends timing packets back to the app, so
+          this step is required for sound.
           EOF
           cd dist && zip -r "../playfruit-windows-${GITHUB_REF_NAME}.zip" .
       - uses: softprops/action-gh-release@v2

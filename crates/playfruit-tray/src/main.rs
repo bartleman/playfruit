@@ -16,6 +16,102 @@ use playfruit_cli::{Engine, EngineConfig, EngineStatus};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+/// Windows Firewall integration: install a program-scoped inbound allow rule
+/// once (with UAC elevation) so users never face the raw firewall
+/// interrogation dialog — whose "Cancel" silently breaks AirPlay timing.
+#[cfg(windows)]
+mod firewall {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const RULE_NAME: &str = "Playfruit";
+
+    fn exe() -> Option<PathBuf> {
+        std::env::current_exe().ok()
+    }
+
+    /// Readable without elevation.
+    pub fn rules_installed() -> bool {
+        Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                &format!("name={RULE_NAME}"),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Adds inbound allow rules for the tray exe (and the CLI exe if it sits
+    /// next to it), UDP+TCP, private/domain profiles only. Must run elevated.
+    pub fn install() -> bool {
+        let Some(exe) = exe() else { return false };
+        let mut programs = vec![exe.clone()];
+        if let Some(dir) = exe.parent() {
+            let cli = dir.join("playfruit.exe");
+            if cli.exists() {
+                programs.push(cli);
+            }
+        }
+        let mut ok = true;
+        for program in &programs {
+            for proto in ["UDP", "TCP"] {
+                ok &= Command::new("netsh")
+                    .args([
+                        "advfirewall",
+                        "firewall",
+                        "add",
+                        "rule",
+                        &format!("name={RULE_NAME}"),
+                        "dir=in",
+                        "action=allow",
+                        &format!("program={}", program.display()),
+                        &format!("protocol={proto}"),
+                        "profile=private,domain",
+                    ])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+            }
+        }
+        ok
+    }
+
+    pub fn remove() {
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={RULE_NAME}"),
+            ])
+            .status();
+    }
+
+    /// Relaunches this exe elevated (standard UAC consent) to run the
+    /// install; returns immediately — the caller polls rules_installed().
+    pub fn request_elevated_install() {
+        if let Some(exe) = exe() {
+            let _ = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    &format!(
+                        "Start-Process -FilePath '{}' -ArgumentList '--install-firewall' -Verb RunAs",
+                        exe.display()
+                    ),
+                ])
+                .spawn();
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Config {
     volume: f32,
@@ -156,6 +252,8 @@ struct App {
     // menu handles
     tray: TrayIcon,
     status_item: MenuItem,
+    firewall_item: MenuItem,
+    firewall_poll_until: Option<Instant>,
     devices_menu: Submenu,
     device_items: Vec<(CheckMenuItem, Speaker)>,
     latency_items: Vec<(CheckMenuItem, LatencyProfile)>,
@@ -264,6 +362,23 @@ impl App {
 }
 
 fn main() {
+    // Elevated helper modes — handled before logging so the elevated instance
+    // never touches (and truncates) the running tray's log file.
+    #[cfg(windows)]
+    {
+        let mode = std::env::args().nth(1);
+        match mode.as_deref() {
+            Some("--install-firewall") => {
+                std::process::exit(if firewall::install() { 0 } else { 1 });
+            }
+            Some("--remove-firewall") => {
+                firewall::remove();
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
     // Log to a file: the windowed subsystem has no console.
     let log_dir = config_dir();
     let _ = std::fs::create_dir_all(&log_dir);
@@ -289,6 +404,16 @@ fn main() {
     // --- menu ---
     let menu = Menu::new();
     let status_item = MenuItem::with_id("status", "Playfruit — idle", false, None);
+    #[cfg(windows)]
+    let firewall_ready_at_start = firewall::rules_installed();
+    #[cfg(not(windows))]
+    let firewall_ready_at_start = true;
+    let firewall_item = MenuItem::with_id(
+        "firewall",
+        "Enable firewall access…",
+        !firewall_ready_at_start,
+        None,
+    );
     let devices_menu = Submenu::new("Stream to", true);
     let rescan_item = MenuItem::with_id("rescan", "Rescan devices", true, None);
 
@@ -327,6 +452,7 @@ fn main() {
 
     let _ = menu.append_items(&[
         &status_item,
+        &firewall_item,
         &PredefinedMenuItem::separator(),
         &devices_menu,
         &rescan_item,
@@ -352,6 +478,8 @@ fn main() {
         config,
         tray,
         status_item,
+        firewall_item,
+        firewall_poll_until: None,
         devices_menu,
         device_items: Vec::new(),
         latency_items,
@@ -363,6 +491,12 @@ fn main() {
     let speakers = scan_speakers(&rt);
     app.rebuild_device_items(speakers);
     app.refresh_checks();
+
+    if firewall_ready_at_start {
+        app.firewall_item.set_text("Firewall access enabled ✓");
+    } else {
+        app.set_status_text("setup: enable firewall access below", false);
+    }
 
     let menu_rx = MenuEvent::receiver();
     let event_loop = EventLoopBuilder::new().build();
@@ -381,6 +515,16 @@ fn main() {
                     std::process::exit(0);
                 }
                 "disconnect" => app.disconnect(),
+                "firewall" => {
+                    #[cfg(windows)]
+                    {
+                        firewall::request_elevated_install();
+                        app.firewall_item.set_text("Waiting for administrator approval…");
+                        app.firewall_item.set_enabled(false);
+                        app.firewall_poll_until =
+                            Some(Instant::now() + Duration::from_secs(60));
+                    }
+                }
                 "rescan" => {
                     let speakers = scan_speakers(&rt);
                     app.rebuild_device_items(speakers);
@@ -415,6 +559,23 @@ fn main() {
                         app.restart_if_active();
                     }
                 }
+            }
+        }
+
+        // Firewall rule install poll (after the UAC elevation round-trip).
+        #[cfg(windows)]
+        if let Some(deadline) = app.firewall_poll_until {
+            if firewall::rules_installed() {
+                app.firewall_poll_until = None;
+                app.firewall_item.set_text("Firewall access enabled ✓");
+                app.firewall_item.set_enabled(false);
+                if app.engine.is_none() {
+                    app.set_status_text("idle", false);
+                }
+            } else if Instant::now() > deadline {
+                app.firewall_poll_until = None;
+                app.firewall_item.set_text("Enable firewall access…");
+                app.firewall_item.set_enabled(true);
             }
         }
 

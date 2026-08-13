@@ -30,13 +30,17 @@ impose.
 [Releases](https://github.com/bartleman/playfruit/releases), unzip, and run
 `playfruit-tray.exe`. No installer, no dependencies.
 
-Two first-run prompts are expected:
+First run on Windows:
 
 - **SmartScreen** warns because the binaries are unsigned: *More info →
   Run anyway*.
-- **Windows Firewall** asks for network access: allow on **private
-  networks**. This is required — AirPlay receivers send timing/sync packets
-  *back* to the app over UDP; without the rule you get silence.
+- **Firewall**: click **"Enable firewall access…"** in the tray menu — one
+  administrator approval adds a precise inbound rule for Playfruit (private
+  networks only), and you're done permanently. This is required because
+  AirPlay receivers send timing/sync packets *back* to the app over UDP;
+  without the rule you get silence. (If you skip it, Windows shows its own
+  firewall dialog instead — choose Allow. `--remove-firewall` cleans the
+  rule up if you ever uninstall.)
 
 ## Using the tray app
 
@@ -72,8 +76,9 @@ Test tools (in `crates/airplay-core/examples/`):
 
 ## Troubleshooting
 
-- **Silence but the app says streaming** — almost always the firewall rule;
-  re-check that inbound UDP is allowed for the app on private networks.
+- **Silence but the app says streaming** — almost always the firewall;
+  use "Enable firewall access…" in the tray menu, or re-check that inbound
+  UDP is allowed for the app on private networks.
 - **Stutter / robotized audio** — Wi-Fi congestion; switch the latency
   profile to `Video` or `Music`, prefer Ethernet on the PC, or move the
   HomePod closer to the access point.
