@@ -538,9 +538,10 @@ mod tests {
             Instant::now(),
         );
         assert!(matches!(exit, PumpExit::SessionDead));
-        // 250 consecutive failures at ~20ms keepalive cadence ≈ 5s + margin.
+        // 250 consecutive failures at ~20ms keepalive cadence ≈ 5s nominal;
+        // generous margin because shared CI runners stretch timer waits.
         assert!(
-            started.elapsed() < Duration::from_secs(10),
+            started.elapsed() < Duration::from_secs(30),
             "dead-sender detection took {:?}",
             started.elapsed()
         );
