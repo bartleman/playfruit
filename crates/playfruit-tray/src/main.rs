@@ -559,15 +559,38 @@ fn main() {
     // Device scans run off-thread; results arrive on a channel polled in the
     // event loop so the UI never blocks on mDNS.
     let (scan_tx, scan_rx) = std::sync::mpsc::channel::<Vec<Speaker>>();
-    spawn_scan(&rt, scan_tx.clone());
-    app.show_scanning_placeholder();
-    app.refresh_checks();
-
+    let mut initial_scan_pending;
     if firewall_ready_at_start {
         app.firewall_item.set_text("Firewall access enabled ✓");
+        app.firewall_item.set_enabled(false);
+        spawn_scan(&rt, scan_tx.clone());
+        app.show_scanning_placeholder();
+        initial_scan_pending = false;
     } else {
-        app.set_status_text("setup: enable firewall access below", IconState::Idle);
+        // First run: request the firewall rule BEFORE any socket is bound, so
+        // Windows' own interrogation dialog never appears — one UAC prompt is
+        // the entire setup. Scanning starts once the rules land (or after the
+        // fallback timeout if the user cancels).
+        initial_scan_pending = true;
+        app.show_scanning_placeholder();
+        app.set_status_text(
+            "first-run setup — approve the administrator prompt",
+            IconState::Busy,
+        );
+        #[cfg(windows)]
+        {
+            firewall::request_elevated_install();
+            app.firewall_item.set_text("Waiting for administrator approval…");
+            app.firewall_item.set_enabled(false);
+            app.firewall_poll_until = Some(Instant::now() + Duration::from_secs(60));
+        }
+        #[cfg(not(windows))]
+        {
+            spawn_scan(&rt, scan_tx.clone());
+            initial_scan_pending = false;
+        }
     }
+    app.refresh_checks();
 
     let menu_rx = MenuEvent::receiver();
     let event_loop = EventLoopBuilder::new().build();

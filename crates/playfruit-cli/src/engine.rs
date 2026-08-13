@@ -15,8 +15,9 @@ use cap_core::streaming::{open_live_stream, LatencyProfile, LivePcmFrame};
 
 /// 20 ms of silence at 44.1 kHz stereo — keepalive unit when capture is quiet.
 const SILENCE_FRAMES: usize = 882;
-/// ~200 ms pre-charged standing fill: fixed known latency, absorbs jitter.
-const PRECHARGE_CHUNKS: usize = 10;
+/// ~300 ms pre-charged standing fill: fixed known latency, absorbs jitter.
+/// (200 ms proved too tight for Windows desktop scheduling.)
+const PRECHARGE_CHUNKS: usize = 15;
 /// Consecutive heartbeat failures before the session is declared dead.
 const HEARTBEAT_STRIKES: u32 = 3;
 
@@ -386,6 +387,7 @@ fn pump_loop(
     let deadband = (sample_rate as f64 * 0.030) as i64;
     let mut drift_dropped: u64 = 0;
     let mut drift_duped: u64 = 0;
+    let mut keepalive_frames: u64 = 0;
     let mut consecutive_send_failures: u32 = 0;
     let queue_full = AtomicU64::new(0);
     let mut last_report = Instant::now();
@@ -410,8 +412,27 @@ fn pump_loop(
                 frame.samples
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // Capture silent — keep the stream timeline fed in real time.
-                vec![0i16; SILENCE_FRAMES * ch]
+                // Deficit-gated keepalive. A timeout alone means nothing on a
+                // desktop OS — normal threads routinely stall 20-50ms and the
+                // queued real frames arrive right after; injecting fixed
+                // silence on every timeout fragments the audio and pushes the
+                // stream ahead of real time until the send queue chokes
+                // (field symptom: plays a moment, dies, repeats). Only inject
+                // when the stream is genuinely BEHIND wall-clock real time —
+                // true capture silence — and inject the actual deficit.
+                let elapsed_frames =
+                    (start.elapsed().as_secs_f64() * sample_rate as f64) as i64;
+                let deficit = elapsed_frames - pushed_frames as i64;
+                if deficit <= deadband {
+                    continue;
+                }
+                // Cap per-iteration injection at 200ms to catch up smoothly.
+                let inject = (deficit as usize).min(sample_rate as usize / 5);
+                keepalive_frames += inject as u64;
+                if keepalive_frames == inject as u64 {
+                    tracing::info!("capture silent — timeline keepalive engaged");
+                }
+                vec![0i16; inject * ch]
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 return PumpExit::CaptureDied
@@ -466,8 +487,10 @@ fn pump_loop(
             tracing::info!(
                 drift_dropped,
                 drift_duped,
+                keepalive_frames,
+                queue_full = queue_full.load(Ordering::Relaxed),
                 minutes = start.elapsed().as_secs() / 60,
-                "drift regulation stats"
+                "pump stats"
             );
             last_report = Instant::now();
         }

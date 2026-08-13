@@ -37,13 +37,13 @@ First run on Windows:
 
 - **SmartScreen** warns because the binaries are unsigned: *More info →
   Run anyway*.
-- **Firewall**: click **"Enable firewall access…"** in the tray menu — one
-  administrator approval adds a program-scoped inbound rule covering ALL
-  network profiles (home networks are often set to "Public", where narrower
-  rules silently don't apply). This is required because AirPlay receivers
-  send timing/sync packets *back* to the app over UDP; without it the
-  HomePod connects but plays silence. `--remove-firewall` cleans up on
-  uninstall.
+- **Firewall**: the administrator prompt appears automatically on first
+  run — one approval adds a program-scoped inbound rule covering ALL
+  network profiles, before the app touches the network (so Windows' own
+  firewall dialog never appears). Required because AirPlay receivers send
+  timing/sync packets *back* to the app over UDP; without it the HomePod
+  connects but plays silence. Declined it? The tray menu's "Enable firewall
+  access…" retries anytime; `--remove-firewall` cleans up on uninstall.
 
 ## Using the tray app
 

@@ -14,11 +14,12 @@ to the exe path). No IPs needed — devices are found by name.
    SmartScreen: *More info → Run anyway*.
    EXPECT: gray circle in the tray (check the `^` overflow near the clock).
 
-3. **Firewall**: right-click the circle → **Enable firewall access…** → approve
-   the UAC prompt.
-   EXPECT: menu item changes to "Firewall access enabled ✓" within ~10s.
-   (Do this even if you did it in an older version — it upgrades the rules to
-   cover Public networks.)
+3. **Firewall**: on first run the administrator prompt appears by itself —
+   approve it. EXPECT: menu shows "Firewall access enabled ✓" within ~10s
+   and no other firewall dialogs ever appear.
+   (Upgrading from an older version: if the prompt doesn't auto-appear,
+   right-click → **Enable firewall access…** once — it upgrades old rules
+   to cover Public networks.)
 
 4. **Doctor** (PowerShell in the unzip folder):
 
