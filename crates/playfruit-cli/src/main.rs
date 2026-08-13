@@ -22,7 +22,7 @@ fn log_dir_hint() -> String {
 }
 
 struct Args {
-    ip: IpAddr,
+    target: String,
     volume: f32,
     latency: LatencyProfile,
     name: String,
@@ -63,19 +63,19 @@ fn parse_args() -> Result<Args, String> {
             }
             other => {
                 if ip.is_none() {
-                    ip = Some(other.parse().map_err(|_| format!("invalid IP: {other}"))?);
+                    ip = Some(other.to_string());
                 } else {
                     return Err(format!("unexpected argument: {other}"));
                 }
             }
         }
     }
-    let ip = ip.ok_or("usage: playfruit <ip> [--volume 0.5] [--latency gaming|video|music]")?;
+    let target = ip.ok_or("usage: playfruit <ip-or-name> [--volume 0.5] [--latency gaming|video|music]")?;
     Ok(Args {
-        ip,
+        name: name.unwrap_or_else(|| format!("HomePod {target}")),
+        target,
         volume: volume.clamp(0.0, 1.0),
         latency,
-        name: name.unwrap_or_else(|| format!("HomePod {ip}")),
     })
 }
 
@@ -83,8 +83,7 @@ fn main() {
     // `playfruit doctor [ip]` — diagnostic mode, quiet by default (no
     // tracing subscriber: check output IS the diagnosis).
     if std::env::args().nth(1).as_deref() == Some("doctor") {
-        let ip = std::env::args().nth(2).and_then(|s| s.parse().ok());
-        std::process::exit(doctor::run(ip));
+        std::process::exit(doctor::run(std::env::args().nth(2)));
     }
 
     tracing_subscriber::fmt()
@@ -102,10 +101,58 @@ fn main() {
         }
     };
 
+    // Accept a device name ("kitchen") as well as an IP: resolve via mDNS.
+    let (ip, resolved_name) = match args.target.parse::<IpAddr>() {
+        Ok(ip) => (ip, None),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let devices = rt
+                .block_on(cap_core::discovery::browse_once(
+                    std::time::Duration::from_secs(3),
+                ))
+                .unwrap_or_default();
+            let needle = args.target.to_lowercase();
+            match devices.iter().find(|d| {
+                d.supports_airplay2
+                    && !d.name.contains('@')
+                    && d.name.to_lowercase().contains(&needle)
+            }) {
+                Some(d) => {
+                    let addr = d
+                        .addresses
+                        .iter()
+                        .find(|a| a.is_ipv4())
+                        .or_else(|| d.addresses.first())
+                        .copied();
+                    match addr {
+                        Some(a) => {
+                            println!("found {} at {a}", d.name);
+                            (a, Some(d.name.clone()))
+                        }
+                        None => {
+                            eprintln!("device '{}' found but has no usable address", d.name);
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "no AirPlay 2 device matching '{}' found — try 'playfruit doctor' to list devices",
+                        args.target
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
+
     let (engine, status_rx) = Engine::start(EngineConfig {
-        ip: args.ip,
+        ip,
         port: 7000,
-        name: args.name,
+        name: resolved_name.unwrap_or(args.name),
         volume: args.volume,
         latency: args.latency,
     });

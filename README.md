@@ -64,12 +64,12 @@ Settings persist in `%APPDATA%\playfruit\config.json`; logs are at
 ## Using the CLI
 
 ```
-playfruit <homepod-ip> [--volume 0.5] [--latency gaming|video|music] [--name NAME]
+playfruit <name-or-ip> [--volume 0.5] [--latency gaming|video|music]
 ```
 
-To find your HomePod's IP: the tray app's device list is the easy way;
-otherwise check your router's client list, or on macOS run
-`dns-sd -B _airplay._tcp local.` and `ping <name>.local`.
+Device names work directly — `playfruit kitchen` finds the speaker via
+mDNS (case-insensitive fragment match). `playfruit doctor` lists everything
+it can see, with addresses.
 
 Test tools (in `crates/airplay-core/examples/`):
 
@@ -80,7 +80,7 @@ Test tools (in `crates/airplay-core/examples/`):
 
 ## Diagnosing problems
 
-`playfruit doctor <homepod-ip>` checks the whole pipeline in ~30 seconds:
+`playfruit doctor` (optionally with a device name or IP) checks the whole pipeline in ~30 seconds:
 firewall rules (including whether they cover your active network profile),
 audio capture (frames/sec and whether real audio is flowing), device
 discovery, reachability, and — the decisive one — whether the HomePod's

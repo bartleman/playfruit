@@ -4,9 +4,8 @@ Run these steps in order on the Windows PC. If any step fails, copy the
 output of that step (plus the log files in step 7) into an issue/report —
 that's enough to diagnose it.
 
-**Prep**: unzip to a fixed folder you won't move (firewall rules are bound to
-the exe path). Know your HomePod's IP (router client list, or the tray's
-device menu shows names — the doctor below prints IPs).
+**Prep**: unzip to a fixed folder you won't move (firewall rules are bound
+to the exe path). No IPs needed — devices are found by name.
 
 1. **Start audio playing** on the PC (a looping YouTube video is perfect) and
    leave it playing for the whole test.
@@ -24,8 +23,11 @@ device menu shows names — the doctor below prints IPs).
 4. **Doctor** (PowerShell in the unzip folder):
 
    ```
-   .\playfruit.exe doctor <homepod-ip>
+   .\playfruit.exe doctor
    ```
+
+   It finds your HomePods automatically. If it lists more than one, pick by
+   name, e.g. `.\playfruit.exe doctor kitchen`.
 
    EXPECT every line `[PASS]` (capture may `[WARN]` if your audio paused).
    The `clock-sync` check is the important one: `FAIL ... 0 timing requests`

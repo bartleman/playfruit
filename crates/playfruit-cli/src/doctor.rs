@@ -11,7 +11,10 @@ fn line(status: &str, name: &str, detail: &str) {
     println!("[{status}] {name} — {detail}");
 }
 
-pub fn run(ip: Option<std::net::IpAddr>) -> i32 {
+/// `target`: an IP, a case-insensitive device-name fragment ("kitchen"), or
+/// None — with None, the session test auto-runs only when exactly one
+/// HomePod exists (never silently takes over a speaker among several).
+pub fn run(target: Option<String>) -> i32 {
     println!("playfruit doctor v{}\n", env!("CARGO_PKG_VERSION"));
     let mut failures = 0;
 
@@ -116,19 +119,80 @@ pub fn run(ip: Option<std::net::IpAddr>) -> i32 {
     let devices = rt
         .block_on(cap_core::discovery::browse_once(Duration::from_secs(3)))
         .unwrap_or_default();
-    let speakers: Vec<String> = devices
+    // Prefer IPv4: link-local IPv6 confuses both users and connect attempts.
+    let pick_addr = |d: &cap_core::discovery::Device| {
+        d.addresses
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| d.addresses.first())
+            .copied()
+    };
+    let speakers: Vec<(String, std::net::IpAddr, cap_core::discovery::DeviceKind)> = devices
         .iter()
         .filter(|d| d.supports_airplay2 && !d.name.contains('@'))
-        .map(|d| format!("{} ({:?}, {:?})", d.name, d.kind, d.addresses.first()))
+        .filter_map(|d| pick_addr(d).map(|a| (d.name.clone(), a, d.kind)))
         .collect();
     if speakers.is_empty() {
         failures += 1;
         line("FAIL", "discovery", "no AirPlay 2 devices found in 3s — check that the PC and HomePod share a network and multicast/mDNS isn't blocked");
     } else {
-        line("PASS", "discovery", &speakers.join("; "));
+        let listing: Vec<String> = speakers
+            .iter()
+            .map(|(n, a, k)| format!("{n} ({k:?}, {a})"))
+            .collect();
+        line("PASS", "discovery", &listing.join("; "));
     }
 
-    // D5 (+D6): live session test against a specific device
+    // Resolve the session-test target: explicit IP, name fragment, or the
+    // sole HomePod on the network.
+    let homepods: Vec<_> = speakers
+        .iter()
+        .filter(|(_, _, k)| *k == cap_core::discovery::DeviceKind::HomePod)
+        .collect();
+    let ip: Option<std::net::IpAddr> = match &target {
+        Some(t) => match t.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                let needle = t.to_lowercase();
+                match speakers
+                    .iter()
+                    .find(|(n, _, _)| n.to_lowercase().contains(&needle))
+                {
+                    Some((n, a, _)) => {
+                        line("INFO", "target", &format!("matched '{t}' to {n} ({a})"));
+                        Some(*a)
+                    }
+                    None => {
+                        failures += 1;
+                        line("FAIL", "target", &format!("no discovered device matches '{t}' — see the discovery list above"));
+                        None
+                    }
+                }
+            }
+        },
+        None => {
+            if homepods.len() == 1 {
+                let (n, a, _) = homepods[0];
+                line("INFO", "target", &format!("one HomePod found — testing against {n} ({a})"));
+                Some(*a)
+            } else if homepods.len() > 1 {
+                line(
+                    "INFO",
+                    "target",
+                    &format!(
+                        "{} HomePods found — re-run as 'playfruit doctor <name>' (e.g. doctor {}) to pick one for the live clock-sync test",
+                        homepods.len(),
+                        homepods[0].0.split_whitespace().next().unwrap_or("kitchen").to_lowercase()
+                    ),
+                );
+                None
+            } else {
+                None
+            }
+        }
+    };
+
+    // D5 (+D6): live session test against the resolved device
     if let Some(ip) = ip {
         match std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::new(ip, 7000),
@@ -199,8 +263,10 @@ pub fn run(ip: Option<std::net::IpAddr>) -> i32 {
                 line("FAIL", "session", &format!("could not establish a session: {e}"));
             }
         }
-    } else {
-        line("SKIP", "session", "pass a HomePod IP to run the live clock-sync test: playfruit doctor <ip>");
+    } else if target.is_none() && homepods.len() <= 1 && homepods.is_empty() {
+        line("SKIP", "session", "no HomePod found to test against");
+    } else if target.is_none() && homepods.len() > 1 {
+        line("SKIP", "session", "multiple HomePods — pick one by name to run the live test");
     }
 
     println!(
