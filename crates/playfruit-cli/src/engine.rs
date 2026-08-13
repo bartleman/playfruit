@@ -572,13 +572,31 @@ mod tests {
     /// detected as SessionDead instead of reporting Streaming forever.
     #[test]
     fn pump_detects_unresponsive_sender() {
-        let (_tx, rx) = test_channel();
+        let (tx, rx) = test_channel();
         // Tiny queue with no consumer: try_send fails permanently once full,
-        // mimicking a dead streamer task.
+        // mimicking a dead streamer task. Drive capture frames explicitly so
+        // failure accumulation runs at frame rate, independent of keepalive
+        // cadence (which stretches on loaded CI runners).
         let (sender, _decoder) = LiveAudioDecoder::create_pair(44_100, 2, 1);
         let stop = Arc::new(AtomicBool::new(false));
         let dead = Arc::new(AtomicBool::new(false));
         let last_audio = Arc::new(AtomicU64::new(u64::MAX));
+
+        let feeder = std::thread::spawn(move || {
+            for _ in 0..1500 {
+                if tx
+                    .send(audio_capture::CapturedFrame {
+                        samples: vec![0i16; 882 * 2],
+                        channels: 2,
+                        sample_rate: 44_100,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
 
         let started = Instant::now();
         let exit = pump_loop(
@@ -592,13 +610,13 @@ mod tests {
             Instant::now(),
         );
         assert!(matches!(exit, PumpExit::SessionDead));
-        // 250 consecutive failures at ~20ms keepalive cadence ≈ 5s nominal;
-        // generous margin because shared CI runners stretch timer waits.
+        // 250 consecutive failures at ~10ms frame cadence ≈ 2.5s nominal.
         assert!(
-            started.elapsed() < Duration::from_secs(30),
+            started.elapsed() < Duration::from_secs(15),
             "dead-sender detection took {:?}",
             started.elapsed()
         );
+        drop(feeder); // feeder ends when its channel send fails post-test
     }
 
     /// Regression: capture channel disconnect must surface as CaptureDied.
