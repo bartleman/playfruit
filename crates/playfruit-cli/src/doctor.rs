@@ -35,15 +35,19 @@ pub fn run(target: Option<String>) -> i32 {
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.display().to_string()))
                     .unwrap_or_default();
-                let path_match = text.contains(&exe_dir);
+                // Case-insensitive: netsh echoes stored path case, Windows
+                // paths are case-insensitive.
+                let path_match = text.to_lowercase().contains(&exe_dir.to_lowercase());
                 if all_profiles && path_match {
                     line("PASS", "firewall-rules", "Playfruit rules present, all profiles, program path matches");
                 } else if !all_profiles {
                     failures += 1;
                     line("FAIL", "firewall-rules", "rules exist but do NOT cover all network profiles — on a Public-profile network the HomePod's clock-sync queries are blocked and it plays SILENCE. Fix: re-run 'Enable firewall access' in the tray menu (upgrades the rule).");
                 } else {
-                    failures += 1;
-                    line("FAIL", "firewall-rules", &format!("rules exist but their program path does not match this exe's folder ({exe_dir}) — they cover a different/moved copy. Fix: re-run 'Enable firewall access'."));
+                    // Path comparison can be confused by moves/short-paths;
+                    // the clock-sync check below is the ground truth, so this
+                    // is advisory, not a failure.
+                    line("WARN", "firewall-rules", &format!("rules found but their program path doesn't obviously match this folder ({exe_dir}). If the clock-sync check below PASSES, ignore this; if it FAILS, re-run 'Enable firewall access' from this copy."));
                 }
             }
             _ => {
