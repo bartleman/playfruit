@@ -262,15 +262,22 @@ async fn supervise(
             let mut silent_reported = false;
             let mut muted_at_ms: Option<u64> = None;
             let mut mute_given_up = false;
+            let mut rtx_last: u64 = 0;
+            let mut rtx_window: u64 = 0;
+            let mut rtx_warned = false;
             let mut timing_warned = false;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await; // skip immediate tick
             loop {
                 interval.tick().await;
-                let (result, timing_count) = {
+                let (result, timing_count, rtx_total) = {
                     let mut conn = hb_conn.lock().await;
-                    (conn.send_feedback().await, conn.timing_request_count())
+                    (
+                        conn.send_feedback().await,
+                        conn.timing_request_count(),
+                        conn.rtx_requested(),
+                    )
                 };
                 match result {
                     Ok(()) => strikes = 0,
@@ -305,6 +312,24 @@ async fn supervise(
                 }
 
                 let age = session_epoch.elapsed();
+
+                // Network-distress tell: the receiver asking for lots of
+                // retransmits means Wi-Fi is dropping audio — the user hears
+                // it as robotize. Warn once with the actionable fix.
+                rtx_window = rtx_window.saturating_add(rtx_total.saturating_sub(rtx_last));
+                rtx_last = rtx_total;
+                if age.as_secs() % 30 < 2 {
+                    if !rtx_warned && rtx_window > 150 {
+                        rtx_warned = true;
+                        tracing::warn!(rtx_window, "heavy retransmit rate — network is dropping audio");
+                        let _ = hb_status.send(EngineStatus::Warning {
+                            name: hb_name.clone(),
+                            message: "Wi-Fi is dropping audio (robotic sound).                                       Switch Latency to Music in the menu, or move                                       the PC/HomePod closer to the router."
+                                .into(),
+                        });
+                    }
+                    rtx_window = 0;
+                }
 
                 // Firewall tell: the HomePod queries our clock several times a
                 // second when it can reach us. Zero queries after 10s means

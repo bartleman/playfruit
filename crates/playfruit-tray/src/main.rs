@@ -141,6 +141,8 @@ struct Config {
     latency: LatencyProfile,
     #[serde(default = "default_true")]
     mute_local: bool,
+    #[serde(default)]
+    cfg_rev: u32,
     last_ip: Option<String>,
     last_name: Option<String>,
 }
@@ -151,6 +153,7 @@ impl Default for Config {
             volume: 0.5,
             latency: LatencyProfile::Video,
             mute_local: true,
+            cfg_rev: 2,
             last_ip: None,
             last_name: None,
         }
@@ -168,10 +171,21 @@ fn config_dir() -> PathBuf {
 }
 
 fn load_config() -> Config {
-    std::fs::read(config_dir().join("config.json"))
+    let mut cfg: Config = std::fs::read(config_dir().join("config.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // One-time migration: configs saved before the default changed carry
+    // Gaming forward silently; the field data says it robotizes on ordinary
+    // Wi-Fi. Users who re-pick Gaming afterwards keep it (cfg_rev sticks).
+    if cfg.cfg_rev < 2 {
+        if cfg.latency == LatencyProfile::Gaming {
+            cfg.latency = LatencyProfile::Video;
+        }
+        cfg.cfg_rev = 2;
+        save_config(&cfg);
+    }
+    cfg
 }
 
 fn save_config(cfg: &Config) {

@@ -1434,6 +1434,12 @@ impl Connection {
         self.timing_server.as_ref().map(|s| s.request_count())
     }
 
+    /// MODIFIED (Playfruit): total retransmit packets the receiver has asked
+    /// for — a spike means the network is dropping our audio (robotize risk).
+    pub fn rtx_requested(&self) -> u64 {
+        self.stream_stats.rtx_requested.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn streamer_underruns(&self) -> u64 {
         self.streamer.as_ref().map_or(0, |s| s.underruns())
     }
