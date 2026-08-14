@@ -20,12 +20,16 @@ impose.
   bundled `click_cli` test tool)
 - ✅ Clock-drift regulation for multi-hour streams, silence keepalive
   (quiet periods don't kill the session), auto-reconnect with backoff
-- ⚠️ **Windows field-testing is in progress.** The first field test found
-  (and we fixed) a firewall-profile gap, a capture-layer bug, and a UI hang;
-  the fixes ship with `playfruit doctor` + engine regression tests, but the
-  full pipeline has not yet been confirmed working end-to-end on real
-  Windows hardware. Treat releases as pre-release quality until this note
-  disappears.
+- ✅ **Field-validated on real Windows hardware** (v0.1.7+): system audio
+  streaming to a HomePod with the echo-free "HomePod only" mode engaging
+  and restoring correctly. Three field-test cycles hardened the firewall
+  flow, the capture layer, and the session engine (each failure became a
+  regression test).
+- ⚠️ Releases are still marked pre-release while profile tuning settles:
+  on busy Wi-Fi the aggressive profiles can "robotize" (the speaker repeats
+  a packet when its buffer runs dry) — if you hear it, switch **Latency**
+  to `Music`; the app also warns when it measures the network dropping
+  audio. Ethernet on the PC helps more than any setting.
 
 ## Install
 
@@ -149,20 +153,32 @@ hard protocol work is theirs.
 **Local modifications to the vendored tree** (each patched file carries a
 `MODIFIED` notice):
 
-- `airplay-audio/src/streamer.rs` — live-mode prefill reduced from ~1 s to
-  ~200 ms standing fill, initial wait capped at 250 ms, and the live channel
-  drained eagerly (the old 40% threshold silently added ~½ s of latency).
+- `airplay-audio/src/streamer.rs` — live-mode prefill wait cut from 5 s
+  (which always timed out at 0% for live sources) to 250 ms, with the
+  caller pre-charging a real ~300 ms standing fill the prefill can see;
+  the live channel drains eagerly up to a 95% buffer gate (the old 40%
+  threshold hid ~½ s of channel backlog as silent latency; 95% keeps
+  overflow structurally impossible — a full-buffer push is fatal upstream);
+  underrun re-buffer threshold 10% → 2.5% (sized to the smaller standing
+  fill); per-packet jitter/decode warnings demoted to debug (each was a
+  synchronous file write inside the packet-pacing loop).
 - `airplay-client/src/connection.rs` — `send_feedback()` propagates timeouts
-  as errors instead of masking them, enabling dead-session detection.
-- `airplay-audio/Cargo.toml`, `src/encoder.rs`, `src/lib.rs` — the AAC
-  encoder is feature-gated off by default (`fdk-aac` is GPL-incompatible and
-  unnecessary: streaming uses ALAC).
-- `airplay-client/src/connection.rs` — the retransmit control loop gets a
-  cooperative shutdown flag (it previously ran forever and blocked runtime
-  shutdown), plus a `timing_request_count()` accessor.
+  as errors instead of masking them (dead sessions used to look healthy
+  forever); the retransmit control loop gets a cooperative shutdown flag
+  (it previously ran forever in a blocking task and hung tokio runtime
+  shutdown — frozen callers); `timing_request_count()` and
+  `rtx_requested()` accessors for health monitoring.
 - `airplay-timing/src/ntp.rs` — counts inbound timing requests so the app
   can detect a receiver that cannot reach us (firewall) instead of playing
   silence with no explanation.
+- `airplay-audio/Cargo.toml`, `src/encoder.rs`, `src/lib.rs` — the AAC
+  encoder is feature-gated off by default (`fdk-aac`'s license is
+  GPL-incompatible and it's unnecessary: streaming uses ALAC).
+
+Several of these fix upstream defects (the feedback-timeout masking, the
+unstoppable control loop, the dead prefill wait, hot-loop logging, the
+fdk-aac licensing issue) and are offered back upstream — see
+[Pabldi08/AirSend#5](https://github.com/Pabldi08/AirSend/issues/5).
 
 Comments in inherited code are partly in Spanish (upstream's language);
 they're welcome to stay, and translation PRs are equally welcome.
