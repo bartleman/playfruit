@@ -136,19 +136,26 @@ Binaries land in `target/release/` (`playfruit`, `playfruit-tray`).
 
 ## Provenance & license
 
-Licensed **GPL-2.0-or-later**. The upstream projects below declare GPL-2.0
-without specifying "only" or "or later" in their grant; per GPLv2 §9 this
-project distributes under "any version" terms and declares or-later (which
-also resolves Apache-2.0 dependency compatibility via GPLv3). If an upstream
-states GPL-2.0-only, this declaration will be revisited.
+Licensed **GPL-3.0-or-later** (SPDX: `GPL-3.0-or-later`; full text in
+`LICENSE`). This matches the upstream protocol stack: after we asked for
+clarification in
+[lmcgartland/airplay2-rs#9](https://github.com/lmcgartland/airplay2-rs/issues/9),
+upstream relicensed to GPL-3.0-or-later in
+[lmcgartland/airplay2-rs#11](https://github.com/lmcgartland/airplay2-rs/pull/11)
+(2026-09), which also settles compatibility with the project's Apache-2.0
+dependencies. The vendored snapshot predates that change and still carries
+upstream's earlier unqualified "GPL-2.0" grant; per GPLv2 §9 an unversioned
+grant may be used under any later version, so it combines cleanly with v3.
+Playfruit was GPL-2.0-or-later before this clarification.
 
 The AirPlay 2 protocol stack is vendored from
 [Pabldi08/airplay2-rs](https://github.com/Pabldi08/airplay2-rs) @ `1baeaae`
 (a fork of [lmcgartland/airplay2-rs](https://github.com/lmcgartland/airplay2-rs)).
 The capture and connection-glue crates originate from
-[Pabldi08/AirSend](https://github.com/Pabldi08/AirSend) (GPL-2.0 per its
-`Cargo.toml` at the time of import, 2026-08). Thanks to both authors — the
-hard protocol work is theirs.
+[Pabldi08/AirSend](https://github.com/Pabldi08/AirSend) (unqualified GPL-2.0
+per its `Cargo.toml` at the time of import, 2026-08, and still as of
+2026-09; used under the same §9 "any later version" terms). Thanks to both
+authors — the hard protocol work is theirs.
 
 **Local modifications to the vendored tree** (each patched file carries a
 `MODIFIED` notice):

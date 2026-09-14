@@ -10,11 +10,12 @@ help effectively.
   (`%APPDATA%\playfruit\playfruit-tray.log`, or console output for the CLI).
 - **PRs**: keep them focused. `cargo build --release -p playfruit-cli
   -p playfruit-tray` must pass; CI builds Windows + checks macOS.
-- **Vendored code** (`vendor/airplay2-rs`): upstream's code, GPL-2.0. Local
+- **Vendored code** (`vendor/airplay2-rs`): upstream's code (snapshot declares
+  GPL-2.0; upstream has since clarified GPL-3.0-or-later). Local
   patches must add a `MODIFIED from upstream` notice at the top of the file
   and an entry in the README's provenance list. Protocol fixes are usually
   better sent upstream first.
-- **License**: contributions are accepted under GPL-2.0-or-later.
+- **License**: contributions are accepted under GPL-3.0-or-later.
 - **Comments**: inherited code has Spanish comments; new code should use
   English. Translation PRs welcome.
 
