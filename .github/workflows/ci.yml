@@ -61,7 +61,7 @@ jobs:
         run: |
           cat > dist/README.txt <<'EOF'
           Playfruit — stream Windows system audio to HomePods over AirPlay 2.
-          Source: https://github.com/bartleman/playfruit (GPL-2.0-or-later; see LICENSE)
+          Source: https://github.com/bartleman/playfruit (GPL-3.0-or-later; see LICENSE)
 
           playfruit-tray.exe — the app. Run it, right-click the tray circle,
                                pick your HomePod under "Stream to".

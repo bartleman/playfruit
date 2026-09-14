@@ -11,7 +11,7 @@ exclude = ["vendor"]
 [workspace.package]
 version = "0.1.9"
 edition = "2021"
-license = "GPL-2.0-or-later"
+license = "GPL-3.0-or-later"
 authors = ["Ricky"]
 repository = "https://github.com/bartleman/playfruit"
 
